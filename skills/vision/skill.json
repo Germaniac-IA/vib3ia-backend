@@ -1,0 +1,33 @@
+{
+  "name": "vision",
+  "display_name": "Vision - Image Analysis",
+  "description": "Analyze images using MiniMax Vision MCP. Describe products, charts, documents, and visual content.",
+  "type": "tool",
+  "visibility": "agent",
+  "risk": "low",
+  "requires": {
+    "bins": ["uv", "node"]
+  },
+  "env": {
+    "MINIMAX_API_KEY": "${ENV:MINIMAX_API_KEY}"
+  },
+  "trigger": {
+    "intent": [
+      "qué es esto",
+      "qué ves en",
+      "describe esta imagen",
+      "analizá esta foto",
+      "qué producto es",
+      "busca este producto",
+      "analizá el gráfico",
+      "lee el documento",
+      "qué dice",
+      "vision"
+    ],
+    "slash": [
+      "vision",
+      "see",
+      "analizar"
+    ]
+  }
+}
