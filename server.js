@@ -121,7 +121,7 @@ app.get('/api/clients/:id', authenticate, async (req, res) => {
 
 app.put('/api/clients/:id', authenticate, async (req, res) => {
   try {
-    const { name, logo_url, slogan, address, phone, email, business_hours, city, instagram_url, facebook_url, tiktok_url, web_url } = req.body;
+    const { name, logo_url, slogan, address, phone, email, business_hours, city, instagram_url, facebook_url, tiktok_url, web_url, razon_social, cuit, condicion_iva, situacion_iibb } = req.body;
     const result = await pool.query(
       `UPDATE clients SET
         name=COALESCE($1,name),
@@ -138,7 +138,9 @@ app.put('/api/clients/:id', authenticate, async (req, res) => {
         web_url=COALESCE($12,web_url),
         updated_at=NOW()
        WHERE id=$13 RETURNING *`,
-      [name, logo_url, slogan, address, phone, email, business_hours, city, instagram_url, facebook_url, tiktok_url, web_url, req.params.id]
+      [name, logo_url, slogan, address, phone, email,
+       business_hours ? JSON.stringify(business_hours) : null,
+       city, instagram_url, facebook_url, tiktok_url, web_url, req.params.id]
     );
     res.json(result.rows[0] || null);
   } catch (error) {
