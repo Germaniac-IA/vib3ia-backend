@@ -308,10 +308,10 @@ app.get('/api/payment-methods', authenticate, async (req, res) => {
 
 app.post('/api/payment-methods', authenticate, async (req, res) => {
   try {
-    const { name, sort_order } = req.body;
+    const { name, is_personal, is_cash, cbu_cvu, alias, banco, sort_order } = req.body;
     const result = await pool.query(
-      'INSERT INTO payment_methods (client_id, name, sort_order) VALUES ($1, $2, $3) RETURNING *',
-      [req.user.client_id, name, sort_order || 0]
+      'INSERT INTO payment_methods (client_id, name, is_personal, is_cash, cbu_cvu, alias, banco, sort_order) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [req.user.client_id, name, is_personal || false, is_cash !== false, cbu_cvu || null, alias || null, banco || null, sort_order || 0]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -321,10 +321,20 @@ app.post('/api/payment-methods', authenticate, async (req, res) => {
 
 app.put('/api/payment-methods/:id', authenticate, async (req, res) => {
   try {
-    const { name, is_active, sort_order } = req.body;
+    const { name, is_personal, is_cash, cbu_cvu, alias, banco, is_active, sort_order } = req.body;
     const result = await pool.query(
-      'UPDATE payment_methods SET name=COALESCE($1,name), is_active=COALESCE($2,is_active), sort_order=COALESCE($3,sort_order), updated_at=NOW() WHERE id=$4 AND client_id=$5 RETURNING *',
-      [name, is_active, sort_order, req.params.id, req.user.client_id]
+      `UPDATE payment_methods SET 
+        name=COALESCE($1,name), 
+        is_personal=COALESCE($2,is_personal), 
+        is_cash=COALESCE($3,is_cash), 
+        cbu_cvu=COALESCE($4,cbu_cvu), 
+        alias=COALESCE($5,alias), 
+        banco=COALESCE($6,banco), 
+        is_active=COALESCE($7,is_active), 
+        sort_order=COALESCE($8,sort_order), 
+        updated_at=NOW() 
+       WHERE id=$9 AND client_id=$10 RETURNING *`,
+      [name, is_personal, is_cash, cbu_cvu, alias, banco, is_active, sort_order, req.params.id, req.user.client_id]
     );
     res.json(result.rows[0] || null);
   } catch (error) {
@@ -353,10 +363,10 @@ app.get('/api/product-categories', authenticate, async (req, res) => {
 
 app.post('/api/product-categories', authenticate, async (req, res) => {
   try {
-    const { name, description, sort_order } = req.body;
+    const { name, description, sort_order, auto_generate_sku } = req.body;
     const result = await pool.query(
-      'INSERT INTO product_categories (client_id, name, description, sort_order) VALUES ($1, $2, $3, $4) RETURNING *',
-      [req.user.client_id, name, description, sort_order || 0]
+      'INSERT INTO product_categories (client_id, name, description, sort_order, auto_generate_sku) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [req.user.client_id, name, description || null, sort_order || 0, auto_generate_sku !== false]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -366,10 +376,14 @@ app.post('/api/product-categories', authenticate, async (req, res) => {
 
 app.put('/api/product-categories/:id', authenticate, async (req, res) => {
   try {
-    const { name, description, is_active, sort_order } = req.body;
+    const { name, description, is_active, sort_order, auto_generate_sku } = req.body;
     const result = await pool.query(
-      'UPDATE product_categories SET name=COALESCE($1,name), description=COALESCE($2,description), is_active=COALESCE($3,is_active), sort_order=COALESCE($4,sort_order), updated_at=NOW() WHERE id=$5 AND client_id=$6 RETURNING *',
-      [name, description, is_active, sort_order, req.params.id, req.user.client_id]
+      `UPDATE product_categories SET 
+        name=COALESCE($1,name), description=COALESCE($2,description), 
+        is_active=COALESCE($3,is_active), sort_order=COALESCE($4,sort_order),
+        auto_generate_sku=COALESCE($5,auto_generate_sku), updated_at=NOW() 
+       WHERE id=$6 AND client_id=$7 RETURNING *`,
+      [name, description, is_active, sort_order, auto_generate_sku, req.params.id, req.user.client_id]
     );
     res.json(result.rows[0] || null);
   } catch (error) {
@@ -398,10 +412,10 @@ app.get('/api/product-brands', authenticate, async (req, res) => {
 
 app.post('/api/product-brands', authenticate, async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, is_imported, premium_level } = req.body;
     const result = await pool.query(
-      'INSERT INTO product_brands (client_id, name) VALUES ($1, $2) RETURNING *',
-      [req.user.client_id, name]
+      'INSERT INTO product_brands (client_id, name, is_imported, premium_level) VALUES ($1, $2, $3, $4) RETURNING *',
+      [req.user.client_id, name, is_imported || false, premium_level || 5]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -411,10 +425,16 @@ app.post('/api/product-brands', authenticate, async (req, res) => {
 
 app.put('/api/product-brands/:id', authenticate, async (req, res) => {
   try {
-    const { name, is_active } = req.body;
+    const { name, is_imported, premium_level, is_active } = req.body;
     const result = await pool.query(
-      'UPDATE product_brands SET name=COALESCE($1,name), is_active=COALESCE($2,is_active), updated_at=NOW() WHERE id=$3 AND client_id=$4 RETURNING *',
-      [name, is_active, req.params.id, req.user.client_id]
+      `UPDATE product_brands SET 
+        name=COALESCE($1,name), 
+        is_imported=COALESCE($2,is_imported), 
+        premium_level=COALESCE($3,premium_level), 
+        is_active=COALESCE($4,is_active), 
+        updated_at=NOW() 
+       WHERE id=$5 AND client_id=$6 RETURNING *`,
+      [name, is_imported, premium_level, is_active, req.params.id, req.user.client_id]
     );
     res.json(result.rows[0] || null);
   } catch (error) {
@@ -435,7 +455,13 @@ app.delete('/api/product-brands/:id', authenticate, async (req, res) => {
 app.get('/api/products', authenticate, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT p.*, pc.name as category_name, pb.name as brand_name
+      SELECT p.*, pc.name as category_name, pb.name as brand_name,
+        COALESCE(
+          (SELECT SUM(pic.quantity * ii.default_cost)
+           FROM product_input_components pic
+           JOIN input_items ii ON pic.input_item_id = ii.id
+           WHERE pic.product_id = p.id), 0
+        ) as computed_cost
       FROM products p
       LEFT JOIN product_categories pc ON p.category_id = pc.id
       LEFT JOIN product_brands pb ON p.brand_id = pb.id
@@ -450,11 +476,31 @@ app.get('/api/products', authenticate, async (req, res) => {
 
 app.post('/api/products', authenticate, async (req, res) => {
   try {
-    const { sku, name, description, category_id, brand_id, price, unit, stock_quantity, min_stock } = req.body;
+    const { sku, sku_externo, name, description, category_id, brand_id, price, unit, stock_quantity, min_stock, requires_stock, is_premium, premium_level, cost_price } = req.body;
+    
+    let finalSku = sku || null;
+    // Auto-generate SKU if category has auto_generate_sku and no SKU provided
+    if ((!finalSku || !finalSku.trim()) && category_id) {
+      const catRes = await pool.query('SELECT name, auto_generate_sku, sku_counter FROM product_categories WHERE id = $1', [category_id]);
+      if (catRes.rows.length > 0 && catRes.rows[0].auto_generate_sku) {
+        const catName = (catRes.rows[0].name || 'XXX').toUpperCase().replace(/[^A-Z]/g, '').substring(0, 3).padEnd(3, 'X');
+        const nextNum = (catRes.rows[0].sku_counter || 0) + 1;
+        finalSku = catName + '-' + String(nextNum).padStart(3, '0');
+        await pool.query('UPDATE product_categories SET sku_counter = $1 WHERE id = $2', [nextNum, category_id]);
+      }
+    }
+
     const result = await pool.query(
-      `INSERT INTO products (client_id, sku, name, description, category_id, brand_id, price, unit, stock_quantity, min_stock)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [req.user.client_id, sku, name, description, category_id, brand_id, price || 0, unit || 'unidad', stock_quantity || 0, min_stock || 0]
+      `INSERT INTO products (client_id, sku, sku_externo, name, description, category_id, brand_id, price, unit, stock_quantity, min_stock, requires_stock, is_premium, premium_level, cost_price)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING *`,
+      [req.user.client_id, finalSku, sku_externo || null, name, description || null, category_id || null, brand_id || null,
+       price || 0, unit || 'unidad',
+       requires_stock ? (stock_quantity || 0) : 0,
+       requires_stock ? (min_stock || 0) : 0,
+       requires_stock || false,
+       is_premium || false,
+       is_premium ? (premium_level || 5) : null,
+       cost_price || 0]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -464,15 +510,17 @@ app.post('/api/products', authenticate, async (req, res) => {
 
 app.put('/api/products/:id', authenticate, async (req, res) => {
   try {
-    const { sku, name, description, category_id, brand_id, price, unit, stock_quantity, min_stock, is_active } = req.body;
+    const { sku, sku_externo, name, description, category_id, brand_id, price, unit, stock_quantity, min_stock, requires_stock, is_premium, premium_level, cost_price, is_active } = req.body;
     const result = await pool.query(
       `UPDATE products SET 
-        sku=COALESCE($1,sku), name=COALESCE($2,name), description=COALESCE($3,description),
-        category_id=COALESCE($4,category_id), brand_id=COALESCE($5,brand_id), price=COALESCE($6,price),
-        unit=COALESCE($7,unit), stock_quantity=COALESCE($8,stock_quantity), min_stock=COALESCE($9,min_stock),
-        is_active=COALESCE($10,is_active), updated_at=NOW()
-       WHERE id=$11 AND client_id=$12 RETURNING *`,
-      [sku, name, description, category_id, brand_id, price, unit, stock_quantity, min_stock, is_active, req.params.id, req.user.client_id]
+        sku=COALESCE($1,sku), sku_externo=COALESCE($2,sku_externo), name=COALESCE($3,name), description=COALESCE($4,description),
+        category_id=COALESCE($5,category_id), brand_id=COALESCE($6,brand_id), price=COALESCE($7,price),
+        unit=COALESCE($8,unit), stock_quantity=COALESCE($9,stock_quantity), min_stock=COALESCE($10,min_stock),
+        requires_stock=COALESCE($11,requires_stock), is_premium=COALESCE($12,is_premium), premium_level=COALESCE($13,premium_level),
+        cost_price=COALESCE($14,cost_price), is_active=COALESCE($15,is_active), updated_at=NOW()
+       WHERE id=$16 AND client_id=$17 RETURNING *`,
+      [sku, sku_externo, name, description, category_id, brand_id, price, unit, stock_quantity, min_stock,
+       requires_stock, is_premium, premium_level, cost_price, is_active, req.params.id, req.user.client_id]
     );
     res.json(result.rows[0] || null);
   } catch (error) {
@@ -483,6 +531,90 @@ app.put('/api/products/:id', authenticate, async (req, res) => {
 app.delete('/api/products/:id', authenticate, async (req, res) => {
   try {
     await pool.query('DELETE FROM products WHERE id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
+    res.json({ message: 'Eliminado' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── INPUT ITEMS (insumos) ─────────────────────────────────────────
+app.get('/api/input-items', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM input_items WHERE client_id = $1 ORDER BY name', [req.user.client_id]);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/input-items', authenticate, async (req, res) => {
+  try {
+    const { name, unit, default_cost } = req.body;
+    const result = await pool.query(
+      'INSERT INTO input_items (client_id, name, unit, default_cost) VALUES ($1, $2, $3, $4) RETURNING *',
+      [req.user.client_id, name, unit || 'unidad', default_cost || 0]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/input-items/:id', authenticate, async (req, res) => {
+  try {
+    const { name, unit, default_cost, is_active } = req.body;
+    const result = await pool.query(
+      `UPDATE input_items SET name=COALESCE($1,name), unit=COALESCE($2,unit), default_cost=COALESCE($3,default_cost), is_active=COALESCE($4,is_active) WHERE id=$5 AND client_id=$6 RETURNING *`,
+      [name, unit, default_cost, is_active, req.params.id, req.user.client_id]
+    );
+    res.json(result.rows[0] || null);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/input-items/:id', authenticate, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM input_items WHERE id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
+    res.json({ message: 'Eliminado' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── PRODUCT INPUT COMPONENTS ─────────────────────────────────────
+app.get('/api/products/:id/components', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT pic.id, pic.quantity, pic.input_item_id, ii.name as input_item_name, ii.unit as input_unit, ii.default_cost
+       FROM product_input_components pic
+       JOIN input_items ii ON pic.input_item_id = ii.id
+       WHERE pic.product_id = $1`,
+      [req.params.id]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/products/:id/components', authenticate, async (req, res) => {
+  try {
+    const { input_item_id, quantity } = req.body;
+    const result = await pool.query(
+      'INSERT INTO product_input_components (product_id, input_item_id, quantity) VALUES ($1, $2, $3) RETURNING *',
+      [req.params.id, input_item_id, quantity || 1]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error.code === '23505') return res.status(400).json({ error: 'Este insumo ya esta en el producto' });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/products/:productId/components/:componentId', authenticate, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM product_input_components WHERE id = $1 AND product_id = $2', [req.params.componentId, req.params.productId]);
     res.json({ message: 'Eliminado' });
   } catch (error) {
     res.status(500).json({ error: error.message });
