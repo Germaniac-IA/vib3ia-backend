@@ -121,10 +121,24 @@ app.get('/api/clients/:id', authenticate, async (req, res) => {
 
 app.put('/api/clients/:id', authenticate, async (req, res) => {
   try {
-    const { name, logo_url, slogan, default_currency, timezone } = req.body;
+    const { name, logo_url, slogan, address, phone, email, business_hours, city, instagram_url, facebook_url, tiktok_url, web_url } = req.body;
     const result = await pool.query(
-      'UPDATE clients SET name=COALESCE($1,name), logo_url=COALESCE($2,logo_url), slogan=COALESCE($3,slogan), default_currency=COALESCE($4,default_currency), timezone=COALESCE($5,timezone), updated_at=NOW() WHERE id=$6 RETURNING *',
-      [name, logo_url, slogan, default_currency, timezone, req.params.id]
+      `UPDATE clients SET
+        name=COALESCE($1,name),
+        logo_url=COALESCE($2,logo_url),
+        slogan=COALESCE($3,slogan),
+        address=COALESCE($4,address),
+        phone=COALESCE($5,phone),
+        email=COALESCE($6,email),
+        business_hours=COALESCE($7,business_hours),
+        city=COALESCE($8,city),
+        instagram_url=COALESCE($9,instagram_url),
+        facebook_url=COALESCE($10,facebook_url),
+        tiktok_url=COALESCE($11,tiktok_url),
+        web_url=COALESCE($12,web_url),
+        updated_at=NOW()
+       WHERE id=$13 RETURNING *`,
+      [name, logo_url, slogan, address, phone, email, business_hours, city, instagram_url, facebook_url, tiktok_url, web_url, req.params.id]
     );
     res.json(result.rows[0] || null);
   } catch (error) {
