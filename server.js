@@ -121,7 +121,7 @@ app.get('/api/clients/:id', authenticate, async (req, res) => {
 
 app.put('/api/clients/:id', authenticate, async (req, res) => {
   try {
-    const { name, logo_url, slogan, address, phone, email, business_hours, city, instagram_url, facebook_url, tiktok_url, web_url, razon_social, cuit, condicion_iva, situacion_iibb } = req.body;
+    const { name, logo_url, slogan, address, phone, whatsapp, email, business_hours, city, instagram_url, facebook_url, tiktok_url, web_url } = req.body;
     const result = await pool.query(
       `UPDATE clients SET
         name=COALESCE($1,name),
@@ -129,17 +129,18 @@ app.put('/api/clients/:id', authenticate, async (req, res) => {
         slogan=COALESCE($3,slogan),
         address=COALESCE($4,address),
         phone=COALESCE($5,phone),
-        email=COALESCE($6,email),
-        business_hours=COALESCE($7,business_hours),
-        city=COALESCE($8,city),
-        instagram_url=COALESCE($9,instagram_url),
-        facebook_url=COALESCE($10,facebook_url),
-        tiktok_url=COALESCE($11,tiktok_url),
-        web_url=COALESCE($12,web_url),
+        whatsapp=COALESCE($6,whatsapp),
+        email=COALESCE($7,email),
+        business_hours=COALESCE($8,business_hours),
+        city=COALESCE($9,city),
+        instagram_url=COALESCE($10,instagram_url),
+        facebook_url=COALESCE($11,facebook_url),
+        tiktok_url=COALESCE($12,tiktok_url),
+        web_url=COALESCE($13,web_url),
         updated_at=NOW()
-       WHERE id=$13 RETURNING *`,
-      [name, logo_url, slogan, address, phone, email,
-       business_hours ? JSON.stringify(business_hours) : null,
+       WHERE id=$14 RETURNING *`,
+      [name, logo_url, slogan, address, phone, whatsapp, email,
+       business_hours ? (Array.isArray(business_hours) ? JSON.stringify(business_hours) : business_hours) : null,
        city, instagram_url, facebook_url, tiktok_url, web_url, req.params.id]
     );
     res.json(result.rows[0] || null);
@@ -148,10 +149,41 @@ app.put('/api/clients/:id', authenticate, async (req, res) => {
   }
 });
 
+// ─── FISCAL DATA ────────────────────────────────────────────────────────────
+app.get('/api/fiscal-data/:clientId', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM fiscal_data WHERE client_id = $1', [req.params.clientId]);
+    res.json(result.rows[0] || null);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/fiscal-data/:clientId', authenticate, async (req, res) => {
+  try {
+    const { razon_social, cuit, condicion_iva, situacion_iibb, numero_iibb } = req.body;
+    const result = await pool.query(
+      `INSERT INTO fiscal_data (client_id, razon_social, cuit, condicion_iva, situacion_iibb, numero_iibb)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (client_id) DO UPDATE SET
+         razon_social=EXCLUDED.razon_social,
+         cuit=EXCLUDED.cuit,
+         condicion_iva=EXCLUDED.condicion_iva,
+         situacion_iibb=EXCLUDED.situacion_iibb,
+         numero_iibb=EXCLUDED.numero_iibb
+       RETURNING *`,
+      [req.params.clientId, razon_social, cuit, condicion_iva, situacion_iibb, numero_iibb]
+    );
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── USERS ─────────────────────────────────────────────────────────
 app.get('/api/users', authenticate, async (req, res) => {
   try {
-    const result = await pool.query('SELECT id, client_id, username, name, email, phone, rol, is_active, created_at FROM users WHERE client_id = $1 ORDER BY name', [req.user.client_id]);
+    const result = await pool.query('SELECT id, client_id, username, name, email, phone, telegram_id, rol, is_active, created_at FROM users WHERE client_id = $1 ORDER BY name', [req.user.client_id]);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -160,12 +192,12 @@ app.get('/api/users', authenticate, async (req, res) => {
 
 app.post('/api/users', authenticate, async (req, res) => {
   try {
-    const { username, password, name, email, phone, rol } = req.body;
+    const { username, password, name, email, phone, telegram_id, rol } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Usuario y contraseña requeridos' });
     const password_hash = bcrypt.hashSync(password, 10);
     const result = await pool.query(
-      'INSERT INTO users (client_id, username, password_hash, name, email, phone, rol) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, client_id, username, name, email, phone, rol, is_active',
-      [req.user.client_id, username, password_hash, name, email, phone, rol || 'operator']
+      'INSERT INTO users (client_id, username, password_hash, name, email, phone, telegram_id, rol) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, client_id, username, name, email, phone, telegram_id, rol, is_active',
+      [req.user.client_id, username, password_hash, name, email, phone, telegram_id || null, rol || 'operator']
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
@@ -176,15 +208,15 @@ app.post('/api/users', authenticate, async (req, res) => {
 
 app.put('/api/users/:id', authenticate, async (req, res) => {
   try {
-    const { name, email, phone, rol, is_active, password } = req.body;
+    const { name, email, phone, telegram_id, rol, is_active, password } = req.body;
     let query, params;
     if (password) {
       const password_hash = bcrypt.hashSync(password, 10);
-      query = 'UPDATE users SET name=COALESCE($1,name), email=COALESCE($2,email), phone=COALESCE($3,phone), rol=COALESCE($4,rol), is_active=COALESCE($5,is_active), password_hash=$6, updated_at=NOW() WHERE id=$7 AND client_id=$8 RETURNING id, client_id, username, name, email, phone, rol, is_active';
-      params = [name, email, phone, rol, is_active, password_hash, req.params.id, req.user.client_id];
+      query = 'UPDATE users SET name=COALESCE($1,name), email=COALESCE($2,email), phone=COALESCE($3,phone), telegram_id=COALESCE($4,telegram_id), rol=COALESCE($5,rol), is_active=COALESCE($6,is_active), password_hash=$7, updated_at=NOW() WHERE id=$8 AND client_id=$9 RETURNING id, client_id, username, name, email, phone, telegram_id, rol, is_active';
+      params = [name, email, phone, telegram_id, rol, is_active, password_hash, req.params.id, req.user.client_id];
     } else {
-      query = 'UPDATE users SET name=COALESCE($1,name), email=COALESCE($2,email), phone=COALESCE($3,phone), rol=COALESCE($4,rol), is_active=COALESCE($5,is_active), updated_at=NOW() WHERE id=$6 AND client_id=$7 RETURNING id, client_id, username, name, email, phone, rol, is_active';
-      params = [name, email, phone, rol, is_active, req.params.id, req.user.client_id];
+      query = 'UPDATE users SET name=COALESCE($1,name), email=COALESCE($2,email), phone=COALESCE($3,phone), telegram_id=COALESCE($4,telegram_id), rol=COALESCE($5,rol), is_active=COALESCE($6,is_active), updated_at=NOW() WHERE id=$7 AND client_id=$8 RETURNING id, client_id, username, name, email, phone, telegram_id, rol, is_active';
+      params = [name, email, phone, telegram_id, rol, is_active, req.params.id, req.user.client_id];
     }
     const result = await pool.query(query, params);
     res.json(result.rows[0] || null);
