@@ -21,7 +21,7 @@ const pool = new Pool({
 });
 
 app.use(cors());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: '50mb' }));
 
 // ─── MIDDLEWARE: Auth ──────────────────────────────────────────────
 function authenticate(req, res, next) {
