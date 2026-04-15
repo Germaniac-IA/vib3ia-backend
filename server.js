@@ -1137,6 +1137,25 @@ app.put('/api/leads/:id/convert', authenticate, async (req, res) => {
   }
 });
 
+app.put('/api/leads/:id/deconvert', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE leads
+       SET status = CASE WHEN status = 'converted' THEN 'qualified' ELSE status END,
+           converted_contact_id = NULL,
+           converted_at = NULL,
+           updated_at = NOW()
+       WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL
+       RETURNING *`,
+      [req.params.id, req.user.client_id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Lead no encontrado' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.delete('/api/leads/:id', authenticate, async (req, res) => {
   try {
     await pool.query('UPDATE leads SET deleted_at = NOW() WHERE deleted_at IS NULL AND id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
