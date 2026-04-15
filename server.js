@@ -39,6 +39,36 @@ function authenticate(req, res, next) {
   }
 }
 
+function cleanText(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text === '' ? null : text;
+}
+
+function normalizeLeadStatus(status) {
+  if (status === undefined || status === null || status === '') return null;
+  if (status === 'discarded') return 'rejected';
+  return status;
+}
+
+function appendUniqueNote(base, extra) {
+  const left = cleanText(base);
+  const right = cleanText(extra);
+  if (!left) return right;
+  if (!right || left.includes(right)) return left;
+  return `${left}\n\n${right}`;
+}
+
+function parseJsonOrNull(value) {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
 // ─── HEALTH ────────────────────────────────────────────────────────
 app.get('/api/health', async (req, res) => {
   try {
@@ -776,10 +806,97 @@ app.put('/api/orders/:id', authenticate, async (req, res) => {
   }
 });
 
+// ─── LEAD SOURCES ──────────────────────────────────────────────────
+app.get('/api/lead-sources', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM lead_sources WHERE deleted_at IS NULL AND client_id = $1 AND is_active = true ORDER BY sort_order, name',
+      [req.user.client_id]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/lead-sources', authenticate, async (req, res) => {
+  try {
+    const { name, sort_order, is_active } = req.body;
+    if (!cleanText(name)) return res.status(400).json({ error: 'Nombre requerido' });
+    const result = await pool.query(
+      'INSERT INTO lead_sources (client_id, name, sort_order, is_active) VALUES ($1, $2, $3, $4) RETURNING *',
+      [req.user.client_id, cleanText(name), Number(sort_order) || 0, is_active !== false]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error.code === '23505') return res.status(400).json({ error: 'Ese origen ya existe' });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/lead-sources/:id', authenticate, async (req, res) => {
+  try {
+    const { name, sort_order, is_active } = req.body;
+    const result = await pool.query(
+      `UPDATE lead_sources
+       SET name = COALESCE($1, name),
+           sort_order = COALESCE($2, sort_order),
+           is_active = COALESCE($3, is_active),
+           updated_at = NOW()
+       WHERE id = $4 AND client_id = $5 AND deleted_at IS NULL
+       RETURNING *`,
+      [cleanText(name), Number.isFinite(Number(sort_order)) ? Number(sort_order) : null, typeof is_active === 'boolean' ? is_active : null, req.params.id, req.user.client_id]
+    );
+    res.json(result.rows[0] || null);
+  } catch (error) {
+    if (error.code === '23505') return res.status(400).json({ error: 'Ese origen ya existe' });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/lead-sources/:id', authenticate, async (req, res) => {
+  try {
+    await pool.query('UPDATE lead_sources SET deleted_at = NOW() WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL', [req.params.id, req.user.client_id]);
+    res.json({ message: 'Eliminado' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── LEADS ─────────────────────────────────────────────────────────
 app.get('/api/leads', authenticate, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM leads WHERE deleted_at IS NULL AND client_id = $1 ORDER BY created_at DESC', [req.user.client_id]);
+    const result = await pool.query(`
+      SELECT l.*,
+             c.name AS converted_contact_name,
+             COALESCE(li.interaction_count, 0) AS interaction_count,
+             COALESCE(l.last_interaction_at, li.last_interaction_at) AS last_interaction_at
+      FROM leads l
+      LEFT JOIN contacts c ON c.id = l.converted_contact_id
+      LEFT JOIN (
+        SELECT lead_id, COUNT(*)::int AS interaction_count, MAX(created_at) AS last_interaction_at
+        FROM lead_interactions
+        WHERE deleted_at IS NULL
+        GROUP BY lead_id
+      ) li ON li.lead_id = l.id
+      WHERE l.deleted_at IS NULL AND l.client_id = $1
+      ORDER BY COALESCE(l.last_interaction_at, li.last_interaction_at, l.updated_at, l.created_at) DESC, l.id DESC
+    `, [req.user.client_id]);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/leads/:id/interactions', authenticate, async (req, res) => {
+  try {
+    const leadRes = await pool.query('SELECT id FROM leads WHERE deleted_at IS NULL AND id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
+    if (leadRes.rows.length === 0) return res.status(404).json({ error: 'Lead no encontrado' });
+
+    const result = await pool.query(
+      'SELECT * FROM lead_interactions WHERE deleted_at IS NULL AND lead_id = $1 AND client_id = $2 ORDER BY created_at DESC, id DESC',
+      [req.params.id, req.user.client_id]
+    );
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -788,11 +905,93 @@ app.get('/api/leads', authenticate, async (req, res) => {
 
 app.post('/api/leads', authenticate, async (req, res) => {
   try {
-    const { name, phone, email, source, notes, status } = req.body;
+    const {
+      name, phone, whatsapp, email, source, source_channel, source_handle,
+      external_contact_id, external_conversation_id, address, location,
+      instagram, facebook, notes, first_message, last_message,
+      status, assigned_to,
+    } = req.body;
+
+    const normalizedStatus = normalizeLeadStatus(status) || 'new';
+    const firstMessage = cleanText(first_message) || cleanText(last_message);
+    const lastMessage = cleanText(last_message) || cleanText(first_message);
+    const hasInitialMessage = Boolean(lastMessage);
+    const nowIso = hasInitialMessage ? new Date().toISOString() : null;
+
     const result = await pool.query(
-      'INSERT INTO leads (client_id, name, phone, email, source, notes, status) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [req.user.client_id, name, phone, email, source, notes, status || 'new']
+      `INSERT INTO leads (
+        client_id, name, phone, whatsapp, email, source, source_channel, source_handle,
+        external_contact_id, external_conversation_id, address, location, instagram, facebook,
+        notes, first_message, first_message_at, last_message, last_message_at, last_interaction_at, status, assigned_to
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8,
+        $9, $10, $11, $12, $13, $14,
+        $15, $16, $17, $18, $19, $20, $21, $22
+      ) RETURNING *`,
+      [
+        req.user.client_id,
+        cleanText(name), cleanText(phone), cleanText(whatsapp), cleanText(email), cleanText(source), cleanText(source_channel), cleanText(source_handle),
+        cleanText(external_contact_id), cleanText(external_conversation_id), cleanText(address), cleanText(location), cleanText(instagram), cleanText(facebook),
+        cleanText(notes), firstMessage, nowIso, lastMessage, nowIso, nowIso, normalizedStatus, cleanText(assigned_to),
+      ]
     );
+
+    if (lastMessage) {
+      await pool.query(
+        `INSERT INTO lead_interactions (lead_id, client_id, channel, direction, message_type, content, sender_name, sender_handle)
+         VALUES ($1, $2, $3, 'inbound', 'text', $4, $5, $6)`,
+        [result.rows[0].id, req.user.client_id, cleanText(source_channel) || cleanText(source) || 'manual', lastMessage, cleanText(name), cleanText(source_handle)]
+      );
+    }
+
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/leads/:id/interactions', authenticate, async (req, res) => {
+  try {
+    const { channel, direction, message_type, content, sender_name, sender_handle, external_message_id, meta_json } = req.body;
+    const leadRes = await pool.query('SELECT * FROM leads WHERE deleted_at IS NULL AND id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
+    const lead = leadRes.rows[0];
+    if (!lead) return res.status(404).json({ error: 'Lead no encontrado' });
+    if (!cleanText(content)) return res.status(400).json({ error: 'Contenido requerido' });
+
+    const result = await pool.query(
+      `INSERT INTO lead_interactions (
+        lead_id, client_id, channel, direction, message_type, content,
+        sender_name, sender_handle, external_message_id, meta_json
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [
+        lead.id,
+        req.user.client_id,
+        cleanText(channel) || lead.source_channel || lead.source || 'manual',
+        cleanText(direction) || 'inbound',
+        cleanText(message_type) || 'text',
+        cleanText(content),
+        cleanText(sender_name),
+        cleanText(sender_handle),
+        cleanText(external_message_id),
+        meta_json ? JSON.stringify(meta_json) : null,
+      ]
+    );
+
+    await pool.query(
+      `UPDATE leads
+       SET first_message = COALESCE(first_message, $1),
+           first_message_at = COALESCE(first_message_at, NOW()),
+           last_message = $1,
+           last_message_at = NOW(),
+           last_interaction_at = NOW(),
+           updated_at = NOW(),
+           source_channel = COALESCE(source_channel, $2),
+           source_handle = COALESCE(source_handle, $3),
+           source = COALESCE(source, $2)
+       WHERE id = $4 AND client_id = $5`,
+      [cleanText(content), cleanText(channel), cleanText(sender_handle), lead.id, req.user.client_id]
+    );
+
     res.status(201).json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -801,14 +1000,140 @@ app.post('/api/leads', authenticate, async (req, res) => {
 
 app.put('/api/leads/:id', authenticate, async (req, res) => {
   try {
-    const { name, phone, email, source, notes, status } = req.body;
+    const {
+      name, phone, whatsapp, email, source,
+      external_contact_id, external_conversation_id, address, location,
+      instagram, facebook, notes,
+      status, assigned_to, rejection_reason,
+    } = req.body;
+
+    const currentRes = await pool.query('SELECT * FROM leads WHERE deleted_at IS NULL AND id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
+    const current = currentRes.rows[0];
+    if (!current) return res.status(404).json({ error: 'Lead no encontrado' });
+
+    const normalizedStatus = normalizeLeadStatus(status);
+    if (normalizedStatus === 'converted' && !current.converted_contact_id) {
+      return res.status(400).json({ error: 'Usá el endpoint de conversión para convertir el lead' });
+    }
+
     const result = await pool.query(
-      'UPDATE leads SET name=COALESCE($1,name), phone=COALESCE($2,phone), email=COALESCE($3,email), source=COALESCE($4,source), notes=COALESCE($5,notes), status=COALESCE($6,status), updated_at=NOW() WHERE id=$7 AND client_id=$8 RETURNING *',
-      [name, phone, email, source, notes, status, req.params.id, req.user.client_id]
+      `UPDATE leads SET
+        name=COALESCE($1,name),
+        phone=COALESCE($2,phone),
+        whatsapp=COALESCE($3,whatsapp),
+        email=COALESCE($4,email),
+        source=COALESCE($5,source),
+        external_contact_id=COALESCE($6,external_contact_id),
+        external_conversation_id=COALESCE($7,external_conversation_id),
+        address=COALESCE($8,address),
+        location=COALESCE($9,location),
+        instagram=COALESCE($10,instagram),
+        facebook=COALESCE($11,facebook),
+        notes=COALESCE($12,notes),
+        status=COALESCE($13,status),
+        assigned_to=COALESCE($14,assigned_to),
+        rejection_reason=COALESCE($15,rejection_reason),
+        updated_at=NOW()
+       WHERE id=$16 AND client_id=$17
+       RETURNING *`,
+      [
+        cleanText(name), cleanText(phone), cleanText(whatsapp), cleanText(email), cleanText(source),
+        cleanText(external_contact_id), cleanText(external_conversation_id), cleanText(address), cleanText(location), cleanText(instagram), cleanText(facebook),
+        cleanText(notes), normalizedStatus, cleanText(assigned_to), cleanText(rejection_reason),
+        req.params.id, req.user.client_id,
+      ]
     );
+
     res.json(result.rows[0] || null);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/leads/:id/convert', authenticate, async (req, res) => {
+  const dbClient = await pool.connect();
+  try {
+    await dbClient.query('BEGIN');
+
+    const leadRes = await dbClient.query('SELECT * FROM leads WHERE deleted_at IS NULL AND id = $1 AND client_id = $2 FOR UPDATE', [req.params.id, req.user.client_id]);
+    const lead = leadRes.rows[0];
+    if (!lead) {
+      await dbClient.query('ROLLBACK');
+      return res.status(404).json({ error: 'Lead no encontrado' });
+    }
+
+    if (lead.converted_contact_id) {
+      await dbClient.query('COMMIT');
+      return res.json({ lead_id: lead.id, contact_id: lead.converted_contact_id, status: 'already_converted' });
+    }
+
+    const existingRes = await dbClient.query(
+      `SELECT * FROM contacts
+       WHERE deleted_at IS NULL AND client_id = $1
+         AND (
+           ($2 IS NOT NULL AND phone = $2)
+           OR ($3 IS NOT NULL AND whatsapp = $3)
+           OR ($4 IS NOT NULL AND LOWER(email) = LOWER($4))
+         )
+       ORDER BY id ASC
+       LIMIT 1`,
+      [req.user.client_id, cleanText(lead.phone), cleanText(lead.whatsapp), cleanText(lead.email)]
+    );
+
+    let contact;
+    if (existingRes.rows[0]) {
+      const currentContact = existingRes.rows[0];
+      const updatedContactRes = await dbClient.query(
+        `UPDATE contacts SET
+          name = COALESCE($1, name),
+          phone = COALESCE($2, phone),
+          email = COALESCE($3, email),
+          address = COALESCE($4, address),
+          location = COALESCE($5, location),
+          notes = COALESCE($6, notes),
+          whatsapp = COALESCE($7, whatsapp),
+          instagram = COALESCE($8, instagram),
+          updated_at = NOW()
+         WHERE id = $9 AND client_id = $10
+         RETURNING *`,
+        [
+          cleanText(lead.name), cleanText(lead.phone), cleanText(lead.email), cleanText(lead.address), cleanText(lead.location),
+          appendUniqueNote(currentContact.notes, lead.notes), cleanText(lead.whatsapp), cleanText(lead.instagram), currentContact.id, req.user.client_id,
+        ]
+      );
+      contact = updatedContactRes.rows[0];
+    } else {
+      const createdContactRes = await dbClient.query(
+        `INSERT INTO contacts (client_id, name, phone, email, address, location, notes, whatsapp, instagram)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING *`,
+        [
+          req.user.client_id,
+          cleanText(lead.name), cleanText(lead.phone), cleanText(lead.email), cleanText(lead.address), cleanText(lead.location),
+          cleanText(lead.notes), cleanText(lead.whatsapp), cleanText(lead.instagram),
+        ]
+      );
+      contact = createdContactRes.rows[0];
+    }
+
+    const updatedLeadRes = await dbClient.query(
+      `UPDATE leads
+       SET status = 'converted',
+           converted_contact_id = $1,
+           converted_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $2 AND client_id = $3
+       RETURNING *`,
+      [contact.id, lead.id, req.user.client_id]
+    );
+
+    await dbClient.query('COMMIT');
+    res.json({ lead: updatedLeadRes.rows[0], contact });
+  } catch (error) {
+    await dbClient.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    dbClient.release();
   }
 });
 
@@ -835,7 +1160,7 @@ app.get('/api/dashboard/summary', authenticate, async (req, res) => {
       pool.query("SELECT COUNT(*) FROM orders WHERE deleted_at IS NULL AND client_id = $1 AND DATE(created_at) >= DATE_TRUNC('month', CURRENT_DATE)", [cid]),
       pool.query("SELECT COALESCE(SUM(total), 0) FROM orders WHERE deleted_at IS NULL AND client_id = $1 AND DATE(created_at) = CURRENT_DATE AND payment_status = 'paid'", [cid]),
       pool.query("SELECT COALESCE(SUM(total), 0) FROM orders WHERE deleted_at IS NULL AND client_id = $1 AND DATE(created_at) >= DATE_TRUNC('month', CURRENT_DATE) AND payment_status = 'paid'", [cid]),
-      pool.query("SELECT COUNT(*) FROM leads WHERE deleted_at IS NULL AND client_id = $1 AND status NOT IN ('converted', 'discarded')", [cid]),
+      pool.query("SELECT COUNT(*) FROM leads WHERE deleted_at IS NULL AND client_id = $1 AND status NOT IN ('converted', 'discarded', 'rejected')", [cid]),
     ]);
 
     res.json({
