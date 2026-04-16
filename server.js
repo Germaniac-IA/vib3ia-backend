@@ -2019,7 +2019,7 @@ app.get('/api/products/stats', authenticate, async (req, res) => {
     else if (period === 'month') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
 
     const totals = await pool.query(
-      "SELECT COUNT(*) FILTER (WHERE is_active = true) as active_count, COUNT(*) FILTER (WHERE discontinued = 1) as discontinued_count, COALESCE(SUM(stock_quantity) FILTER (WHERE is_active = true), 0) as total_stock, COALESCE(SUM(stock_quantity * price) FILTER (WHERE is_active = true AND requires_stock = true), 0) as inventory_value FROM products WHERE client_id = $1 AND deleted_at IS NULL",
+      "SELECT COUNT(*) FILTER (WHERE is_active = true) as active_count, COUNT(*) FILTER (WHERE is_active = false OR is_active IS NULL) as inactive_count, COALESCE(SUM(stock_quantity) FILTER (WHERE is_active = true), 0) as total_stock, COALESCE(SUM(stock_quantity * price) FILTER (WHERE is_active = true AND requires_stock = true), 0) as inventory_value FROM products WHERE client_id = $1 AND deleted_at IS NULL",
       params
     );
     const lowStock = await pool.query(
@@ -2027,7 +2027,7 @@ app.get('/api/products/stats', authenticate, async (req, res) => {
       params
     );
     const bestSeller = await pool.query(
-      "SELECT p.name, SUM(oi.quantity) as total_sold FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id WHERE p.client_id = $1 AND o.deleted_at IS NULL " + dateFilter + " GROUP BY p.name ORDER BY total_sold DESC LIMIT 1",
+      "SELECT p.name, SUM(oi.quantity) as total_sold FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id WHERE p.client_id = $1 AND o.deleted_at IS NULL AND DATE(o.created_at) = CURRENT_DATE" + (period !== 'today' ? " AND DATE(o.created_at) >= DATE_TRUNC('week', CURRENT_DATE)" : "") + " GROUP BY p.name ORDER BY total_sold DESC LIMIT 1",
       params
     );
     res.json({
@@ -2047,12 +2047,12 @@ app.get('/api/contacts/stats', authenticate, async (req, res) => {
     const { period } = req.query;
     let dateFilter = '';
     const params = [req.user.client_id];
-    if (period === 'today') dateFilter = "AND DATE(created_at) = CURRENT_DATE";
-    else if (period === 'week') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
-    else if (period === 'month') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
+    if (period === 'today') dateFilter = "AND DATE(c.created_at) = CURRENT_DATE";
+    else if (period === 'week') dateFilter = "AND DATE(c.created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
+    else if (period === 'month') dateFilter = "AND DATE(c.created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
 
     const totals = await pool.query(
-      "SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) as total, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) as deleted_count, COUNT(*) FILTER (WHERE whatsapp IS NOT NULL AND whatsapp != '') as with_whatsapp, COUNT(*) FILTER (WHERE instagram IS NOT NULL AND instagram != '') as with_instagram, COUNT(*) FILTER (WHERE tiktok IS NOT NULL AND tiktok != '') as with_tiktok, COUNT(*) FILTER (WHERE email IS NOT NULL AND email != '') as with_email FROM contacts WHERE client_id = $1",
+      "SELECT COUNT(*) FILTER (WHERE c.deleted_at IS NULL) as total, COUNT(*) FILTER (WHERE c.deleted_at IS NOT NULL) as deleted_count, COUNT(*) FILTER (WHERE c.whatsapp IS NOT NULL AND c.whatsapp != '') as with_whatsapp, COUNT(*) FILTER (WHERE c.instagram IS NOT NULL AND c.instagram != '') as with_instagram, COUNT(*) FILTER (WHERE c.tiktok IS NOT NULL AND c.tiktok != '') as with_tiktok, COUNT(*) FILTER (WHERE c.email IS NOT NULL AND c.email != '') as with_email FROM contacts c WHERE c.client_id = $1",
       params
     );
     const newContacts = await pool.query(
@@ -2090,7 +2090,7 @@ app.get('/api/leads/stats', authenticate, async (req, res) => {
       params
     );
     const sources = await pool.query(
-      "SELECT COALESCE(l.source, 'Sin origen') as source, COUNT(*) as count FROM leads l WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter + " GROUP BY ls.name ORDER BY count DESC LIMIT 5",
+      "SELECT COALESCE(l.source, 'Sin origen') as source, COUNT(*) as count FROM leads l WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter + " GROUP BY l.source ORDER BY count DESC LIMIT 5",
       params
     );
     let liDateFilter = '';
