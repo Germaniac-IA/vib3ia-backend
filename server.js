@@ -1210,7 +1210,7 @@ app.put('/api/orders/:id', authenticate, async (req, res) => {
     const updated = result.rows[0];
     // Sync order status to delivery
     if (order_status_id !== undefined && updated?.delivery_id) {
-      const deliveryMap = { 1: 'Pendiente', 2: 'En camino', 3: 'Entregado', 4: 'Cancelado' };
+      const deliveryMap = { 1: 'Pendiente', 2: 'En Camino', 3: 'Entregado', 4: 'Cancelado' };
       const newStatus = deliveryMap[Number(order_status_id)];
       if (newStatus) {
         await pool.query('UPDATE deliveries SET status = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL', [newStatus, updated.delivery_id]);
@@ -2705,7 +2705,7 @@ app.get('/api/deliveries/stats', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE status = 'Pendiente') as pending_count,
-         COUNT(*) FILTER (WHERE status = 'En camino') as in_transit_count,
+         COUNT(*) FILTER (WHERE status = 'En Camino') as in_transit_count,
          COUNT(*) FILTER (WHERE status = 'Entregado') as delivered_count,
          COUNT(*) FILTER (WHERE status = 'Cancelado') as cancelled_count,
          COUNT(*) as total_count
@@ -2746,7 +2746,7 @@ app.put('/api/deliveries/:id', async (req, res) => {
     if (!rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'No encontrada' }); }
     // Sync delivery status to order status (map delivery status to order_status_id)
     const deliveryStatus = rows[0].status;
-    const statusMap = { 'Pendiente': 1, 'En camino': 2, 'Entregado': 3, 'Cancelado': 4 };
+    const statusMap = { 'Pendiente': 1, 'En Camino': 2, 'Entregado': 3, 'Cancelado': 4 };
     if (statusMap[deliveryStatus]) {
       await client.query(
         `UPDATE orders SET order_status_id = $1 WHERE id = $2`,
@@ -2818,7 +2818,7 @@ app.get('/api/deliveries/stats', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT
          COUNT(*) FILTER (WHERE status = 'Pendiente') as pending_count,
-         COUNT(*) FILTER (WHERE status = 'En camino') as in_transit_count,
+         COUNT(*) FILTER (WHERE status = 'En Camino') as in_transit_count,
          COUNT(*) FILTER (WHERE status = 'Entregado') as delivered_count,
          COUNT(*) FILTER (WHERE status = 'Cancelado') as cancelled_count,
          COUNT(*) as total_count
