@@ -1059,6 +1059,28 @@ app.post('/api/orders', authenticate, async (req, res) => {
       [req.user.client_id]
     );
 
+    // Stock validation and deduction
+    for (const item of (items || [])) {
+      const prodResult = await client.query(
+        'SELECT name, requires_stock, stock_quantity FROM products WHERE id = $1 AND deleted_at IS NULL',
+        [item.product_id]
+      );
+      if (prodResult.rows[0]) {
+        const prod = prodResult.rows[0];
+        if (prod.requires_stock) {
+          const available = Number(prod.stock_quantity || 0);
+          if (Number(item.quantity) > available) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: `Stock insuficiente para "${prod.name}". Disponible: ${available}` });
+          }
+          await client.query(
+            'UPDATE products SET stock_quantity = stock_quantity - $1 WHERE id = $2',
+            [item.quantity, item.product_id]
+          );
+        }
+      }
+    }
+
     await client.query('BEGIN');
 
     const orderResult = await client.query(`
@@ -1799,6 +1821,17 @@ app.post('/api/leads/:id/resolve', authenticate, async (req, res) => {
 
 app.delete('/api/orders/:id', authenticate, async (req, res) => {
   try {
+    // Restore stock for deleted order
+    const delItems = await pool.query(
+      'SELECT product_id, quantity FROM order_items WHERE order_id = $1 AND deleted_at IS NULL',
+      [req.params.id]
+    );
+    for (const item of delItems.rows) {
+      await pool.query(
+        'UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2 AND requires_stock = true',
+        [item.quantity, item.product_id]
+      );
+    }
     await pool.query('UPDATE orders SET deleted_at = NOW() WHERE id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
     res.json({ message: 'Venta eliminada' });
   } catch (error) { res.status(500).json({ error: error.message }); }
