@@ -592,7 +592,11 @@ app.delete('/api/products/:id', authenticate, async (req, res) => {
 // ─── INPUT ITEMS (insumos) ─────────────────────────────────────────
 app.get('/api/input-items', authenticate, async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM input_items WHERE deleted_at IS NULL AND client_id = $1 ORDER BY name', [req.user.client_id]);
+    const { q = '' } = req.query;
+    const result = await pool.query(
+      'SELECT * FROM input_items WHERE deleted_at IS NULL AND client_id = $1 AND (name ILIKE $2 OR unit ILIKE $2) ORDER BY name LIMIT 50',
+      [req.user.client_id, q ? '%' + q + '%' : '%']
+    );
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -2304,7 +2308,7 @@ app.post('/api/purchase-orders', async (req, res) => {
     const order = rows[0];
     if (items && items.length > 0) {
       for (const item of items) {
-        await pool.query("INSERT INTO purchase_order_items (order_id, product_id, product_name, quantity, unit_price, subtotal) VALUES ($1, $2, $3, $4, $5, $6)", [order.id, item.product_id, item.product_name, item.quantity, item.unit_price, item.quantity * item.unit_price]);
+        await pool.query("INSERT INTO purchase_order_items (order_id, product_id, input_item_id, product_name, quantity, unit_price, subtotal) VALUES ($1, $2, $3, $4, $5, $6)", [order.id, item.product_id || null, item.input_item_id || null, item.product_name, item.quantity, item.unit_price, item.quantity * item.unit_price]);
       }
     }
     // Si pagaron en el acto, registrar movimiento de pago entrante
@@ -2372,7 +2376,7 @@ app.post('/api/purchase-orders/:id/items', async (req, res) => {
   try {
     const { product_id, product_name, quantity, unit_price } = req.body;
     const subtotal = quantity * unit_price;
-    const { rows } = await pool.query("INSERT INTO purchase_order_items (order_id, product_id, product_name, quantity, unit_price, subtotal) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *", [req.params.id, product_id, product_name, quantity, unit_price, subtotal]);
+    const { rows } = await pool.query("INSERT INTO purchase_order_items (order_id, product_id, input_item_id, product_name, quantity, unit_price, subtotal) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *", [req.params.id, product_id, input_item_id || null, product_name, quantity, unit_price, subtotal]);
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2396,6 +2400,9 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
         if (prod.rows[0]?.requires_stock) {
           await pool.query('UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2', [item.quantity, item.product_id]);
         }
+      }
+      if (item.input_item_id) {
+        await pool.query('UPDATE input_items SET stock_quantity = stock_quantity + $1, last_cost = $2 WHERE id = $3', [item.quantity, item.unit_price, item.input_item_id]);
       }
     }
     res.json({ ok: true, message: 'NP marcada como recibida, stock actualizado' });
