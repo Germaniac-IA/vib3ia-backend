@@ -1,0 +1,9 @@
+CREATE TABLE order_payments (
+  id SERIAL PRIMARY KEY,
+  order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  amount NUMERIC(12,2) NOT NULL,
+  payment_method_id INTEGER REFERENCES payment_methods(id) ON DELETE SET NULL,
+  paid_at TIMESTAMP DEFAULT NOW(),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  deleted_at TIMESTAMP
+);
