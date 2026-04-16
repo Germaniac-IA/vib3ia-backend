@@ -2396,13 +2396,10 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     const items = await pool.query('SELECT * FROM purchase_order_items WHERE order_id = $1 AND deleted_at IS NULL', [req.params.id]);
     for (const item of items.rows) {
       if (item.product_id) {
-        const prod = await pool.query('SELECT stock_quantity, requires_stock FROM products WHERE id = $1', [item.product_id]);
-        if (prod.rows[0]?.requires_stock) {
-          await pool.query('UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2', [item.quantity, item.product_id]);
-        }
+        await pool.query('UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2', [Number(item.quantity), item.product_id]);
       }
       if (item.input_item_id) {
-        await pool.query('UPDATE input_items SET stock_quantity = stock_quantity + $1, last_cost = $2 WHERE id = $3', [item.quantity, item.unit_price, item.input_item_id]);
+        await pool.query('UPDATE input_items SET stock_quantity = stock_quantity + $1, last_cost = $2 WHERE id = $3', [Number(item.quantity), item.unit_price, item.input_item_id]);
       }
     }
     res.json({ ok: true, message: 'NP marcada como recibida, stock actualizado' });
