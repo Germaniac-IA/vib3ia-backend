@@ -618,10 +618,10 @@ app.post('/api/input-items', authenticate, async (req, res) => {
 
 app.put('/api/input-items/:id', authenticate, async (req, res) => {
   try {
-    const { name, unit, default_cost, is_active } = req.body;
+    const { name, unit, default_cost, is_active, requires_stock, stock_quantity } = req.body;
     const result = await pool.query(
-      `UPDATE input_items SET name=COALESCE($1,name), unit=COALESCE($2,unit), default_cost=COALESCE($3,default_cost), is_active=COALESCE($4,is_active) WHERE id=$5 AND client_id=$6 RETURNING *`,
-      [name, unit, default_cost, is_active, req.params.id, req.user.client_id]
+      `UPDATE input_items SET name=COALESCE($1,name), unit=COALESCE($2,unit), default_cost=COALESCE($3,default_cost), is_active=COALESCE($4,is_active), requires_stock=COALESCE($5,requires_stock), stock_quantity=COALESCE($6,stock_quantity) WHERE id=$7 AND client_id=$8 RETURNING *`,
+      [name, unit, default_cost, is_active, requires_stock, stock_quantity, req.params.id, req.user.client_id]
     );
     res.json(result.rows[0] || null);
   } catch (error) {
@@ -653,6 +653,40 @@ app.get('/api/products/:id/components', authenticate, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// PATCH /api/input-items/:id/cost - update cost with method
+app.patch('/api/input-items/:id/cost', authenticate, async (req, res) => {
+  try {
+    const { method, custom_value, avg_count } = req.body;
+    const itemId = req.params.id;
+    let newCost = custom_value;
+
+    if (method === 'current') {
+      // No change, keep current
+      const { rows } = await pool.query('SELECT default_cost FROM input_items WHERE id=$1 AND deleted_at IS NULL', [itemId]);
+      newCost = rows[0]?.default_cost;
+    } else if (method === 'reposition') {
+      const { rows } = await pool.query('SELECT last_cost FROM input_items WHERE id=$1 AND deleted_at IS NULL', [itemId]);
+      newCost = rows[0]?.last_cost || 0;
+    } else if (method === 'average') {
+      const count = Number(avg_count) || 5;
+      const { rows } = await pool.query(
+        `SELECT AVG(poi.unit_price) as avg_cost FROM purchase_order_items poi
+         JOIN purchase_orders po ON poi.order_id = po.id
+         WHERE poi.input_item_id = $1 AND poi.deleted_at IS NULL AND po.deleted_at IS NULL
+         ORDER BY poi.created_at DESC LIMIT $2`,
+        [itemId, count]
+      );
+      newCost = rows[0]?.avg_cost || 0;
+    }
+
+    if (newCost === undefined || newCost === null) return res.status(400).json({ error: 'No hay datos para calcular el costo' });
+
+    await pool.query('UPDATE input_items SET default_cost = $1 WHERE id = $2', [newCost, itemId]);
+    res.json({ success: true, new_cost: newCost });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 
 app.post('/api/products/:id/components', authenticate, async (req, res) => {
   try {
