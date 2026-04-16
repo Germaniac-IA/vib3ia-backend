@@ -2831,6 +2831,173 @@ app.get('/api/deliveries/stats', async (req, res) => {
 
 
 
+// ===================== CASH SESSIONS =====================
+// POST /api/cash-sessions - open a new cash session
+app.post('/api/cash-sessions', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const userId = req.user?.id;
+    const { initial_amount } = req.body || {};
+    // Check if there's already an open session for this client
+    const existing = await pool.query(
+      "SELECT id FROM cash_sessions WHERE client_id=$1 AND status='open' AND deleted_at IS NULL",
+      [clientId]
+    );
+    if (existing.rows[0]) {
+      return res.status(409).json({ error: 'Ya hay una caja abierta', session_id: existing.rows[0].id });
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO cash_sessions (client_id, created_by, initial_amount, status, session_type)
+       VALUES ($1, $2, $3, 'open', 'cash') RETURNING *`,
+      [clientId, userId || null, initial_amount || 0]
+    );
+    res.status(201).json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/cash-sessions/current - get current open session for this client
+app.get('/api/cash-sessions/current', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { rows } = await pool.query(
+      `SELECT cs.*, u.name as user_name,
+              (SELECT COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_in,
+              (SELECT COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_out
+       FROM cash_sessions cs
+       LEFT JOIN users u ON cs.created_by = u.id
+       WHERE cs.client_id=$1 AND cs.status='open' AND cs.deleted_at IS NULL
+       ORDER BY cs.opened_at DESC LIMIT 1`,
+      [clientId]
+    );
+    if (!rows[0]) return res.json(null);
+    const net = Number(rows[0].total_in || 0) - Number(rows[0].total_out || 0);
+    res.json({ ...rows[0], net });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/cash-sessions/open - list other users' open sessions
+app.get('/api/cash-sessions/open', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { rows } = await pool.query(
+      `SELECT cs.id, cs.session_type, cs.opened_at, cs.initial_amount,
+              u.name as user_name, u.id as user_id,
+              (SELECT COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_in,
+              (SELECT COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_out
+       FROM cash_sessions cs
+       LEFT JOIN users u ON cs.created_by = u.id
+       WHERE cs.client_id=$1 AND cs.status='open' AND cs.deleted_at IS NULL
+       ORDER BY cs.opened_at DESC`,
+      [clientId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/cash-sessions/:id/join - join an existing open session
+app.post('/api/cash-sessions/:id/join', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT id FROM cash_sessions WHERE id=$1 AND status='open' AND deleted_at IS NULL",
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Sesion no encontrada o cerrada' });
+    res.json({ success: true, session_id: req.params.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/cash-sessions/:id/close - close a cash session
+app.post('/api/cash-sessions/:id/close', async (req, res) => {
+  try {
+    const { final_amount, total_cash, total_digital, total_other, notes } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1,
+       total_cash=$2, total_digital=$3, total_other=$4, notes=$5, updated_at=NOW()
+       WHERE id=$6 AND status='open' AND deleted_at IS NULL RETURNING *`,
+      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, notes || '', req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Sesion no encontrada o ya cerrada' });
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ===================== CASH MOVEMENTS =====================
+// GET /api/cash-movements - list with filters
+app.get('/api/cash-movements', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { type, period, session_id } = req.query;
+    let dateFilter = '';
+    if (period === 'today') dateFilter = " AND DATE(cm.created_at) = CURRENT_DATE";
+    else if (period === 'week') dateFilter = " AND cm.created_at >= CURRENT_DATE - INTERVAL '7 days'";
+    else if (period === 'month') dateFilter = " AND cm.created_at >= CURRENT_DATE - INTERVAL '30 days'";
+    let typeFilter = type ? ` AND cm.type = '${type}'` : '';
+    let sessionFilter = session_id ? ` AND cm.session_id = ${session_id}` : '';
+    const { rows } = await pool.query(
+      `SELECT cm.id, cm.type, cm.amount, cm.reason, cm.reference, cm.notes, cm.created_at,
+              u.name as user_name,
+              COALESCE(c.name, co.supplier_name, '') as counterparty_name,
+              COALESCE(cm.order_number, '') as order_number,
+              COALESCE(cm.client_name, '') as client_name
+       FROM cash_movements cm
+       LEFT JOIN users u ON cm.created_by = u.id
+       LEFT JOIN contacts c ON cm.contact_id = c.id
+       LEFT JOIN providers co ON cm.supplier_id = co.id
+       WHERE cm.client_id=$1 AND cm.deleted_at IS NULL${dateFilter}${typeFilter}${sessionFilter}
+       ORDER BY cm.created_at DESC`,
+      [clientId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/cash-movements - create a movement
+app.post('/api/cash-movements', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const userId = req.user?.id;
+    const { type, amount, reason, reference, notes, contact_id, supplier_id, order_id, order_number, session_id, client_name } = req.body;
+    if (!session_id) return res.status(400).json({ error: 'session_id requerido' });
+    if (!type || !amount) return res.status(400).json({ error: 'type y amount requeridos' });
+    const { rows } = await pool.query(
+      `INSERT INTO cash_movements (client_id, created_by, session_id, type, amount, reason, reference, notes, contact_id, supplier_id, order_id, order_number, client_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
+      [clientId, userId || null, session_id, type, amount, reason || '', reference || '', notes || '', contact_id || null, supplier_id || null, order_id || null, order_number || '', client_name || '']
+    );
+    res.status(201).json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/cash/stats - summary stats
+app.get('/api/cash/stats', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { session_id } = req.query;
+    let sessionFilter = session_id ? ` AND session_id = ${session_id}` : '';
+    const { rows } = await pool.query(
+      `SELECT
+         COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) as total_in,
+         COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) as total_out,
+         COUNT(*) FILTER (WHERE type='in') as move_count_in,
+         COUNT(*) FILTER (WHERE type='out') as move_count_out,
+         COUNT(*) as move_count,
+         COUNT(DISTINCT order_id) FILTER (WHERE order_id IS NOT NULL) as nv_count
+       FROM cash_movements WHERE client_id=$1 AND deleted_at IS NULL${sessionFilter}`,
+      [clientId]
+    );
+    const r = rows[0];
+    res.json({
+      total_in: Number(r.total_in || 0),
+      total_out: Number(r.total_out || 0),
+      net: Number(r.total_in || 0) - Number(r.total_out || 0),
+      move_count: Number(r.move_count || 0),
+      nv_count: Number(r.nv_count || 0)
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+
 
 app.listen(PORT, () => {
   console.log(`[req.user.client_id, name, is_active !== false, sort_order || 0, has_delivery === true]🚀 VIB3.ia Backend running on http://localhost:${PORT}`);
