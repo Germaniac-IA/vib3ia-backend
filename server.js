@@ -2090,11 +2090,15 @@ app.get('/api/leads/stats', authenticate, async (req, res) => {
       params
     );
     const sources = await pool.query(
-      "SELECT COALESCE(ls.name, 'Sin origen') as source, COUNT(*) as count FROM leads l LEFT JOIN lead_sources ls ON l.source_id = ls.id WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter + " GROUP BY ls.name ORDER BY count DESC LIMIT 5",
+      "SELECT COALESCE(l.source, 'Sin origen') as source, COUNT(*) as count FROM leads l WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter + " GROUP BY ls.name ORDER BY count DESC LIMIT 5",
       params
     );
+    let liDateFilter = '';
+    if (period === 'today') liDateFilter = "AND DATE(li.created_at) = CURRENT_DATE";
+    else if (period === 'week') liDateFilter = "AND DATE(li.created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
+    else if (period === 'month') liDateFilter = "AND DATE(li.created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
     const interactions = await pool.query(
-      "SELECT COUNT(*) as total_interactions FROM lead_interactions li JOIN leads l ON li.lead_id = l.id WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter,
+      "SELECT COUNT(*) as total_interactions FROM lead_interactions li WHERE li.client_id = $1 " + liDateFilter,
       params
     );
     const totalLeadsAll = parseInt(totalLeads.rows[0]?.total || 0);
