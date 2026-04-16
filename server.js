@@ -1147,9 +1147,9 @@ app.post('/api/orders', authenticate, async (req, res) => {
       );
       if (channelRow.rows[0]?.has_delivery) {
         await client.query(
-          `INSERT INTO deliveries (order_id, address, location, scheduled_date, scheduled_time, delivery_fee, notes, client_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [orderId, delivery?.address || '', delivery?.location || '', delivery?.scheduled_date || null, delivery?.scheduled_time || '', fee, delivery?.notes || '', req.user.client_id]
+          `INSERT INTO deliveries (order_id, contact_id, address, location, scheduled_date, scheduled_time, delivery_fee, notes, client_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [orderId, orderResult.rows[0].contact_id, delivery?.address || '', delivery?.location || '', delivery?.scheduled_date || null, delivery?.scheduled_time || '', fee, delivery?.notes || '', req.user.client_id]
         );
       }
     }
