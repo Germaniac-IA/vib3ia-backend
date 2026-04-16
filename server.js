@@ -1837,6 +1837,174 @@ app.delete('/api/orders/:id', authenticate, async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
+// ─── ORDER ITEMS (for edit) ─────────────────────────────────
+app.post('/api/orders/:id/items', authenticate, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { product_id, quantity, unit_price } = req.body;
+    const orderId = req.params.id;
+
+    // Verify order belongs to client
+    const order = await client.query('SELECT id, total FROM orders WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL', [orderId, req.user.client_id]);
+    if (!order.rows[0]) return res.status(404).json({ error: 'Orden no encontrada' });
+
+    // Get product info
+    const prod = await client.query('SELECT name, requires_stock, stock_quantity FROM products WHERE id = $1 AND deleted_at IS NULL', [product_id]);
+    if (!prod.rows[0]) return res.status(400).json({ error: 'Producto no encontrado' });
+    const prodData = prod.rows[0];
+
+    // Stock check
+    if (prodData.requires_stock) {
+      if (Number(quantity) > Number(prodData.stock_quantity || 0)) {
+        return res.status(400).json({ error: `Stock insuficiente para "${prodData.name}". Disponible: ${prodData.stock_quantity}` });
+      }
+    }
+
+    await client.query('BEGIN');
+
+    // Deduct stock
+    if (prodData.requires_stock) {
+      await client.query('UPDATE products SET stock_quantity = stock_quantity - $1 WHERE id = $2', [quantity, product_id]);
+    }
+
+    // Add item
+    const itemResult = await client.query(
+      'INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, subtotal) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [orderId, product_id, prodData.name, quantity, unit_price, Number(quantity) * Number(unit_price)]
+    );
+
+    // Recalculate order total
+    const allItems = await client.query('SELECT subtotal FROM order_items WHERE order_id = $1 AND deleted_at IS NULL', [orderId]);
+    const subtotal = allItems.rows.reduce((s, i) => s + Number(i.subtotal), 0);
+    // Get discount and delivery fee from order
+    const orderData = await client.query('SELECT subtotal as order_subtotal, discount_type, discount_value, delivery_fee FROM orders WHERE id = $1', [orderId]);
+    const od = orderData.rows[0];
+    let discountAmount = 0;
+    if (od.discount_type === 'percent' && Number(od.discount_value)) {
+      discountAmount = subtotal * (Number(od.discount_value) / 100);
+    } else if (od.discount_type === 'fixed' && Number(od.discount_value)) {
+      discountAmount = Number(od.discount_value);
+    }
+    const total = Math.max(0, subtotal - discountAmount + Number(od.delivery_fee || 0));
+    await client.query('UPDATE orders SET subtotal = $1, total = $2, updated_at = NOW() WHERE id = $3', [subtotal, total, orderId]);
+
+    await client.query('COMMIT');
+    res.status(201).json(itemResult.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.put('/api/orders/:id/items/:itemId', authenticate, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { quantity, unit_price } = req.body;
+    const orderId = req.params.id;
+    const itemId = req.params.itemId;
+
+    const order = await client.query('SELECT id FROM orders WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL', [orderId, req.user.client_id]);
+    if (!order.rows[0]) return res.status(404).json({ error: 'Orden no encontrada' });
+
+    await client.query('BEGIN');
+
+    // Get current item
+    const item = await client.query('SELECT product_id, quantity FROM order_items WHERE id = $1 AND order_id = $2 AND deleted_at IS NULL', [itemId, orderId]);
+    if (!item.rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Item no encontrado' }); }
+    const oldQty = Number(item.rows[0].quantity);
+    const newQty = Number(quantity);
+
+    // Adjust stock difference
+    const prod = await client.query('SELECT requires_stock FROM products WHERE id = $1', [item.rows[0].product_id]);
+    if (prod.rows[0]?.requires_stock) {
+      const diff = newQty - oldQty;
+      if (diff > 0) {
+        const stockCheck = await client.query('SELECT stock_quantity FROM products WHERE id = $1', [item.rows[0].product_id]);
+        if (Number(stockCheck.rows[0].stock_quantity || 0) < diff) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Stock insuficiente para aumentar cantidad' });
+        }
+        await client.query('UPDATE products SET stock_quantity = stock_quantity - $1 WHERE id = $2', [diff, item.rows[0].product_id]);
+      } else if (diff < 0) {
+        await client.query('UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2', [Math.abs(diff), item.rows[0].product_id]);
+      }
+    }
+
+    // Update item
+    const price = unit_price !== undefined ? Number(unit_price) : undefined;
+    await client.query(
+      'UPDATE order_items SET quantity=COALESCE($1,quantity), unit_price=COALESCE($2,unit_price), subtotal=COALESCE($1,quantity)*COALESCE($2,unit_price,unit_price) WHERE id = $3',
+      [quantity, price, itemId]
+    );
+
+    // Recalculate order total
+    const allItems = await client.query('SELECT subtotal FROM order_items WHERE order_id = $1 AND deleted_at IS NULL', [orderId]);
+    const subtotal = allItems.rows.reduce((s, i) => s + Number(i.subtotal), 0);
+    const orderData = await client.query('SELECT discount_type, discount_value, delivery_fee FROM orders WHERE id = $1', [orderId]);
+    const od = orderData.rows[0];
+    let discountAmount = 0;
+    if (od.discount_type === 'percent' && Number(od.discount_value)) {
+      discountAmount = subtotal * (Number(od.discount_value) / 100);
+    } else if (od.discount_type === 'fixed' && Number(od.discount_value)) {
+      discountAmount = Number(od.discount_value);
+    }
+    const total = Math.max(0, subtotal - discountAmount + Number(od.delivery_fee || 0));
+    await client.query('UPDATE orders SET subtotal = $1, total = $2, updated_at = NOW() WHERE id = $3', [subtotal, total, orderId]);
+
+    await client.query('COMMIT');
+    res.json({ message: 'Item actualizado' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
+app.delete('/api/orders/:id/items/:itemId', authenticate, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const orderId = req.params.id;
+    const itemId = req.params.itemId;
+
+    const order = await client.query('SELECT id FROM orders WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL', [orderId, req.user.client_id]);
+    if (!order.rows[0]) return res.status(404).json({ error: 'Orden no encontrada' });
+
+    await client.query('BEGIN');
+
+    // Get item to restore stock
+    const item = await client.query('SELECT product_id, quantity FROM order_items WHERE id = $1 AND order_id = $2 AND deleted_at IS NULL', [itemId, orderId]);
+    if (item.rows[0]) {
+      await client.query('UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2 AND requires_stock = true', [item.rows[0].quantity, item.rows[0].product_id]);
+      await client.query('UPDATE order_items SET deleted_at = NOW() WHERE id = $1', [itemId]);
+    }
+
+    // Recalculate order total
+    const allItems = await client.query('SELECT subtotal FROM order_items WHERE order_id = $1 AND deleted_at IS NULL', [orderId]);
+    const subtotal = allItems.rows.reduce((s, i) => s + Number(i.subtotal), 0);
+    const orderData = await client.query('SELECT discount_type, discount_value, delivery_fee FROM orders WHERE id = $1', [orderId]);
+    const od = orderData.rows[0];
+    let discountAmount = 0;
+    if (od.discount_type === 'percent' && Number(od.discount_value)) {
+      discountAmount = subtotal * (Number(od.discount_value) / 100);
+    } else if (od.discount_type === 'fixed' && Number(od.discount_value)) {
+      discountAmount = Number(od.discount_value);
+    }
+    const total = Math.max(0, subtotal - discountAmount + Number(od.delivery_fee || 0));
+    await client.query('UPDATE orders SET subtotal = $1, total = $2, updated_at = NOW() WHERE id = $3', [subtotal, total, orderId]);
+
+    await client.query('COMMIT');
+    res.json({ message: 'Item eliminado' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: error.message });
+  } finally {
+    client.release();
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`\n🚀 VIB3.ia Backend running on http://localhost:${PORT}`);
