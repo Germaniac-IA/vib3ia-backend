@@ -2187,6 +2187,36 @@ app.post('/api/cash-sessions', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// GET /api/cash-sessions/open - list other users' open sessions
+app.get('/api/cash-sessions/open', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT cs.id, cs.session_type, cs.opened_at, cs.total_in, cs.total_out,
+              u.name as user_name, u.id as user_id
+       FROM cash_sessions cs
+       LEFT JOIN users u ON cs.created_by = u.id
+       WHERE cs.status = 'open' AND cs.deleted_at IS NULL
+       ORDER BY cs.opened_at DESC`
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/cash-sessions/:id/join - join another user's open session
+app.post('/api/cash-sessions/:id/join', async (req, res) => {
+  try {
+    // The user just needs to be able to post movements to this session
+    // For now, just return success - the session_id in the JWT will be used
+    const { rows } = await pool.query(
+      "SELECT id FROM cash_sessions WHERE id = $1 AND status = 'open' AND deleted_at IS NULL",
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Sesión no encontrada o cerrada' });
+    res.json({ success: true, session_id: req.params.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/cash-sessions/current', async (req, res) => {
   try {
     const user_id = req.user?.id || 1;
