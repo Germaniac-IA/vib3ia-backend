@@ -2723,30 +2723,57 @@ app.get('/api/deliveries/:id', async (req, res) => {
 
 // PUT /api/deliveries/:id
 app.put('/api/deliveries/:id', async (req, res) => {
+  const client = await pool.connect();
   try {
     const { address, scheduled_date, status, notes, delivery_fee } = req.body;
-    const { rows } = await pool.query(
+    await client.query('BEGIN');
+    // Update delivery
+    const { rows } = await client.query(
       `UPDATE deliveries SET address = COALESCE($1, address), scheduled_date = COALESCE($2, scheduled_date),
        status = COALESCE($3, status), notes = COALESCE($4, notes), delivery_fee = COALESCE($5, delivery_fee), updated_at = NOW()
        WHERE id = $6 AND deleted_at IS NULL RETURNING *`,
       [address, scheduled_date, status, notes, delivery_fee, req.params.id]
     );
-    if (!rows[0]) return res.status(404).json({ error: 'No encontrada' });
+    if (!rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'No encontrada' }); }
+    // Sync delivery status to order status (map delivery status to order_status_id)
+    const deliveryStatus = rows[0].status;
+    const statusMap = { 'Pendiente': 1, 'En camino': 2, 'Entregado': 3, 'Cancelado': 4 };
+    if (statusMap[deliveryStatus]) {
+      await client.query(
+        `UPDATE orders SET order_status_id = $1 WHERE id = $2`,
+        [statusMap[deliveryStatus], rows[0].order_id]
+      );
+    }
+    await client.query('COMMIT');
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
 });
 
 // POST /api/deliveries/:id/confirm - confirm delivery (one-click like leads→clients)
 app.post('/api/deliveries/:id/confirm', async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { rows } = await pool.query(
+    await client.query('BEGIN');
+    const { rows } = await client.query(
       `UPDATE deliveries SET status = 'Entregado', delivered_date = CURRENT_DATE, updated_at = NOW()
        WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
       [req.params.id]
     );
-    if (!rows[0]) return res.status(404).json({ error: 'No encontrada' });
+    if (!rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'No encontrada' }); }
+    await client.query(`UPDATE orders SET order_status_id = 3 WHERE id = $1`, [rows[0].order_id]);
+    await client.query('COMMIT');
     res.json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
 });
 
 // POST /api/deliveries/:id/cancel - cancel delivery + rollback stock + cancel order
