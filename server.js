@@ -2681,6 +2681,25 @@ app.post('/api/deliveries', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /api/deliveries/stats - summary for dashboard
+app.get('/api/deliveries/stats', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'Pendiente') as pending_count,
+         COUNT(*) FILTER (WHERE status = 'En camino') as in_transit_count,
+         COUNT(*) FILTER (WHERE status = 'Entregado') as delivered_count,
+         COUNT(*) FILTER (WHERE status = 'Cancelado') as cancelled_count,
+         COUNT(*) as total_count
+       FROM deliveries WHERE client_id = $1 AND deleted_at IS NULL`,
+      [clientId]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/deliveries/:id
 // GET /api/deliveries/:id
 app.get('/api/deliveries/:id', async (req, res) => {
   try {
