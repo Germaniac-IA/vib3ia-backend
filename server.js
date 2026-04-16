@@ -1071,10 +1071,10 @@ app.put('/api/leads/:id/convert', authenticate, async (req, res) => {
       `SELECT * FROM contacts
        WHERE deleted_at IS NULL AND client_id = $1
          AND (
-           ($2 IS NOT NULL AND phone = $2)
-           OR ($3 IS NOT NULL AND whatsapp = $3)
-           OR ($4 IS NOT NULL AND LOWER(email) = LOWER($4))
-         )
+           (phone = $2 OR whatsapp = $3 OR LOWER(email) = LOWER($4))
+           AND ($2 IS NULL OR phone = $2)
+           AND ($3 IS NULL OR whatsapp = $3)
+           AND ($4 IS NULL OR LOWER(email) = LOWER($4))         )
        ORDER BY id ASC
        LIMIT 1`,
       [req.user.client_id, cleanText(lead.phone), cleanText(lead.whatsapp), cleanText(lead.email)]
@@ -1120,11 +1120,12 @@ app.put('/api/leads/:id/convert', authenticate, async (req, res) => {
       `UPDATE leads
        SET status = 'converted',
            converted_contact_id = $1,
+           previous_status = $4,
            converted_at = NOW(),
            updated_at = NOW()
        WHERE id = $2 AND client_id = $3
        RETURNING *`,
-      [contact.id, lead.id, req.user.client_id]
+      [contact.id, lead.id, req.user.client_id, lead.status]
     );
 
     await dbClient.query('COMMIT');
@@ -1139,9 +1140,18 @@ app.put('/api/leads/:id/convert', authenticate, async (req, res) => {
 
 app.put('/api/leads/:id/deconvert', authenticate, async (req, res) => {
   try {
+    // First get the current converted_contact_id before updating
+    const lead = await pool.query(
+      'SELECT converted_contact_id FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL',
+      [req.params.id, req.user.client_id]
+    );
+    if (lead.rows.length === 0) return res.status(404).json({ error: 'Lead no encontrado' });
+    const contactIdToDelete = lead.rows[0].converted_contact_id;
+
     const result = await pool.query(
       `UPDATE leads
-       SET status = CASE WHEN status = 'converted' THEN 'qualified' ELSE status END,
+       SET status = COALESCE(previous_status, 'qualified'),
+           previous_status = NULL,
            converted_contact_id = NULL,
            converted_at = NULL,
            updated_at = NOW()
@@ -1149,7 +1159,15 @@ app.put('/api/leads/:id/deconvert', authenticate, async (req, res) => {
        RETURNING *`,
       [req.params.id, req.user.client_id]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Lead no encontrado' });
+
+    // Soft-delete the contact if one existed (was converted)
+    if (contactIdToDelete) {
+      await pool.query(
+        'UPDATE contacts SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL',
+        [contactIdToDelete]
+      );
+    }
+
     res.json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1244,6 +1262,129 @@ app.post('/api/products/:id/image', authenticate, async (req, res) => {
 const imageDir = '/var/www/dash-images';
 app.use('/images', express.static(imageDir));
 
+
+
+// ─── LEAD MATCH & MERGE ────────────────────────────────────
+
+// POST /api/leads/:id/verify-match
+// Checks if lead matches any existing contact by phone/whatsapp/email/instagram
+app.post('/api/leads/:id/verify-match', authenticate, async (req, res) => {
+  try {
+    const leadRes = await pool.query(
+      'SELECT * FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL',
+      [req.params.id, req.user.client_id]
+    );
+    if (leadRes.rows.length === 0) return res.status(404).json({ error: 'Lead no encontrado' });
+    if (leadRes.rows[0].status === 'merged') return res.status(400).json({ error: 'Lead ya fusionado' });
+
+    const lead = leadRes.rows[0];
+
+    // Search for contact by phone, whatsapp, email, instagram
+    const matchRes = await pool.query(
+      `SELECT * FROM contacts
+       WHERE deleted_at IS NULL AND client_id = $1
+         AND (
+           ($2 IS NOT NULL AND phone = $2)
+           OR ($2 IS NOT NULL AND whatsapp = $2)
+           OR ($3 IS NOT NULL AND email = $3)
+           OR ($4 IS NOT NULL AND instagram = $4)
+         )
+       LIMIT 1`,
+      [req.user.client_id, cleanText(lead.phone), cleanText(lead.email), cleanText(lead.instagram)]
+    );
+
+    if (matchRes.rows.length === 0) {
+      return res.json({ matched: false, contact: null, conflicts: null });
+    }
+
+    const contact = matchRes.rows[0];
+
+    // Check for conflicts — fields where lead has data and contact also has data, and they differ
+    const conflictFields = [];
+    const fields = ['name', 'phone', 'email', 'address', 'location', 'whatsapp', 'instagram'];
+    for (const field of fields) {
+      const leadVal = cleanText(lead[field]);
+      const contactVal = cleanText(contact[field]);
+      if (leadVal && contactVal && leadVal !== contactVal) {
+        conflictFields.push({ field, contact_value: contactVal, lead_value: leadVal });
+      }
+    }
+
+    res.json({
+      matched: true,
+      contact: { id: contact.id, name: contact.name, phone: contact.phone },
+      conflicts: conflictFields.length > 0 ? conflictFields : null
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/leads/:id/resolve
+// Resolves merge conflicts: merges lead data into contact and marks lead as merged
+// Body: { contact_id, resolution: { field: 'contact' | 'lead' } }
+app.post('/api/leads/:id/resolve', authenticate, async (req, res) => {
+  try {
+    const { contact_id, resolution } = req.body;
+    if (!contact_id || !resolution) return res.status(400).json({ error: 'Faltan datos' });
+
+    const leadRes = await pool.query(
+      'SELECT * FROM leads WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL',
+      [req.params.id, req.user.client_id]
+    );
+    if (leadRes.rows.length === 0) return res.status(404).json({ error: 'Lead no encontrado' });
+
+    const lead = leadRes.rows[0];
+
+    const contactRes = await pool.query(
+      'SELECT * FROM contacts WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL',
+      [contact_id, req.user.client_id]
+    );
+    if (contactRes.rows.length === 0) return res.status(404).json({ error: 'Contacto no encontrado' });
+
+    const contact = contactRes.rows[0];
+    const dbClient = await pool.connect();
+
+    try {
+      await dbClient.query('BEGIN');
+
+      const mergeData = {};
+      const fields = ['name', 'phone', 'email', 'address', 'location', 'whatsapp', 'instagram'];
+      for (const field of fields) {
+        const choice = resolution[field];
+        if (choice === 'lead') {
+          mergeData[field] = cleanText(lead[field]);
+        } else {
+          mergeData[field] = contact[field];
+        }
+      }
+
+      const updateSet = Object.keys(mergeData).map((k, i) => k + ' = $' + (i + 1)).join(', ');
+      const updateValues = Object.values(mergeData);
+      await dbClient.query(
+        'UPDATE contacts SET ' + updateSet + ', updated_at = NOW() WHERE id = $' + (updateValues.length + 1) + ' AND client_id = $' + (updateValues.length + 2),
+        [...updateValues, contact_id, req.user.client_id]
+      );
+
+      await dbClient.query(
+        'UPDATE leads SET status = $1, linked_contact_id = $2, merge_resolved_at = NOW(), updated_at = NOW() WHERE id = $3 AND client_id = $4',
+        ['merged', contact_id, req.params.id, req.user.client_id]
+      );
+
+      await dbClient.query('COMMIT');
+
+      const updatedContact = await pool.query('SELECT * FROM contacts WHERE id = $1', [contact_id]);
+      res.json({ success: true, contact: updatedContact.rows[0], lead_id: lead.id });
+    } catch (err) {
+      await dbClient.query('ROLLBACK');
+      throw err;
+    } finally {
+      dbClient.release();
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 app.listen(PORT, () => {
   console.log(`\n🚀 VIB3.ia Backend running on http://localhost:${PORT}`);
   console.log(`   Database: ${process.env.DATABASE_URL ? 'configured' : 'NOT CONFIGURED'}`);
