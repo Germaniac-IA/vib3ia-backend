@@ -2302,13 +2302,13 @@ app.post('/api/purchase-orders', async (req, res) => {
     const { rows: payRows } = await pool.query("SELECT id FROM payment_statuses WHERE name = 'Impago' LIMIT 1");
     const payStatusId = payRows[0]?.id;
     const { rows } = await pool.query(
-      "INSERT INTO purchase_orders (order_number, provider_id, subtotal, discount_type, discount_value, delivery_fee, total, status_id, payment_status_id, notes) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
-      [order_number, provider_id || null, subtotal, discount_type || null, discount || 0, delivery_fee || 0, total, statusId, payStatusId, notes || null]
+      "INSERT INTO purchase_orders (client_id, order_number, provider_id, subtotal, discount_type, discount_value, delivery_fee, total, status_id, payment_status_id, notes) VALUES (COALESCE($1,1), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *",
+      [req.user?.client_id || 1, order_number, provider_id || null, subtotal, discount_type || null, discount || 0, delivery_fee || 0, total, statusId, payStatusId, notes || null]
     );
     const order = rows[0];
     if (items && items.length > 0) {
       for (const item of items) {
-        await pool.query("INSERT INTO purchase_order_items (order_id, product_id, input_item_id, product_name, quantity, unit_price, subtotal) VALUES ($1, $2, $3, $4, $5, $6)", [order.id, item.product_id || null, item.input_item_id || null, item.product_name, item.quantity, item.unit_price, item.quantity * item.unit_price]);
+        await pool.query("INSERT INTO purchase_order_items (order_id, product_id, input_item_id, product_name, quantity, unit_price, subtotal) VALUES ($1, $2, $3, $4, $5, $6, $7)", [order.id, item.product_id || null, item.input_item_id || null, item.product_name, item.quantity, item.unit_price, item.quantity * item.unit_price]);
       }
     }
     // Si pagaron en el acto, registrar movimiento de pago entrante
