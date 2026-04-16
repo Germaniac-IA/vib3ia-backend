@@ -2167,7 +2167,7 @@ app.get('/api/cash-sessions', async (req, res) => {
     sql += ' ORDER BY cs.opened_at DESC LIMIT 50';
     const { rows } = await pool.query(sql, params);
     for (const s of rows) {
-      const mv = await pool.query("SELECT cm.*, fa.name as account_name, c.name as contact_name, o.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN financial_accounts fa ON cm.financial_account_id = fa.id LEFT JOIN contacts c ON cm.contact_id = c.id LEFT JOIN orders o ON cm.order_id = o.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [s.id, 'cash']);
+      const mv = await pool.query("SELECT cm.*, fa.name as account_name, c.name as contact_name, o.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id LEFT JOIN contacts c ON cm.contact_id = c.id LEFT JOIN orders o ON cm.order_id = o.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [s.id, 'cash']);
       s.movements = mv.rows;
       s.total_in = mv.rows.filter(m => m.type === 'in').reduce((sum, m) => sum + Number(m.amount), 0);
       s.total_out = mv.rows.filter(m => m.type === 'out').reduce((sum, m) => sum + Number(m.amount), 0);
@@ -2193,7 +2193,7 @@ app.get('/api/cash-sessions/current', async (req, res) => {
     const { rows } = await pool.query("SELECT cs.*, u.name as user_name FROM cash_sessions cs LEFT JOIN users u ON cs.user_id = u.id WHERE cs.user_id = $1 AND cs.status = 'open' AND cs.session_type = 'cash' ORDER BY cs.opened_at DESC LIMIT 1", [user_id]);
     if (rows.length === 0) return res.json(null);
     const sess = rows[0];
-    const mv = await pool.query("SELECT cm.*, fa.name as account_name, c.name as contact_name, o.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN financial_accounts fa ON cm.financial_account_id = fa.id LEFT JOIN contacts c ON cm.contact_id = c.id LEFT JOIN orders o ON cm.order_id = o.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [sess.id, 'cash']);
+    const mv = await pool.query("SELECT cm.*, fa.name as account_name, c.name as contact_name, o.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id LEFT JOIN contacts c ON cm.contact_id = c.id LEFT JOIN orders o ON cm.order_id = o.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [sess.id, 'cash']);
     sess.movements = mv.rows;
     sess.total_in = mv.rows.filter(m => m.type === 'in').reduce((sum, m) => sum + Number(m.amount), 0);
     sess.total_out = mv.rows.filter(m => m.type === 'out').reduce((sum, m) => sum + Number(m.amount), 0);
@@ -2214,14 +2214,30 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
 // Cash Movements (Cobros)
 app.get('/api/cash-movements', async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT cm.*, fa.name as account_name, c.name as contact_name, o.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN financial_accounts fa ON cm.financial_account_id = fa.id LEFT JOIN contacts c ON cm.contact_id = c.id LEFT JOIN orders o ON cm.order_id = o.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_type = 'cash' ORDER BY cm.created_at DESC LIMIT 200");
+    const { type, period = 'month' } = req.query;
+    let dateF = " AND DATE(cm.created_at) >= CURRENT_DATE - INTERVAL '30 days'";
+    if (period === 'today') dateF = " AND DATE(cm.created_at) = CURRENT_DATE";
+    else if (period === 'week') dateF = " AND DATE(cm.created_at) >= CURRENT_DATE - INTERVAL '7 days'";
+    const typeF = type ? `AND cm.type = '${type}'` : '';
+    const { rows } = await pool.query(
+      `SELECT cm.*, fa.name as account_name, c.name as client_name,
+              prov.name as supplier_name, o.order_number, po.order_number as po_number
+       FROM cash_movements cm
+       LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id
+       LEFT JOIN contacts c ON cm.client_id = c.id
+       LEFT JOIN providers prov ON cm.supplier_id = prov.id
+       LEFT JOIN orders o ON cm.order_id = o.id
+       LEFT JOIN purchase_orders po ON cm.purchase_order_id = po.id
+       WHERE cm.deleted_at IS NULL ${dateF} ${typeF}
+       ORDER BY cm.created_at DESC LIMIT 200`
+    );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/cash-movements', async (req, res) => {
   try {
-    const { financial_account_id, type = 'in', reason = 'other_in', order_id, contact_id, amount, notes } = req.body;
+    const { financial_account_id, type = 'in', reason = 'other_in', order_id, contact_id, supplier_id, purchase_order_id, amount, notes } = req.body;
     if (!financial_account_id || !amount) return res.status(400).json({ error: 'Faltan campos requeridos' });
     const user_id = req.user?.id || 1;
     const sess = await pool.query("SELECT * FROM cash_sessions WHERE user_id = $1 AND status = 'open' AND session_type = 'cash' ORDER BY opened_at DESC LIMIT 1", [user_id]);
@@ -2230,7 +2246,7 @@ app.post('/api/cash-movements', async (req, res) => {
       const ns = await pool.query("INSERT INTO cash_sessions (user_id, opened_at, status, initial_amount, session_type) VALUES ($1, NOW(), 'open', 0, 'cash') RETURNING id", [user_id]);
       session_id = ns.rows[0].id;
     }
-    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, contact_id, amount, notes, created_by, created_at) VALUES ($1, 'cash', $2, $3, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, amount, notes || null, user_id]);
+    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_by, created_at) VALUES ($1, 'cash', $2, $3, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null, user_id]);
     if (reason === 'nv_payment' && order_id) {
       await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at, created_by, notes) VALUES ($1, $2, $3, NOW(), $4, $5)", [order_id, financial_account_id, amount, user_id, notes || 'Cobro desde modulo Cobros']);
     }
@@ -2256,13 +2272,13 @@ app.get('/api/cash/stats', async (req, res) => {
         COALESCE(SUM(CASE WHEN cm.type = 'in' THEN cm.amount ELSE 0 END), 0) as total_in,
         COALESCE(SUM(CASE WHEN cm.type = 'out' THEN cm.amount ELSE 0 END), 0) as total_out,
         COUNT(*) as move_count,
-        COUNT(DISTINCT cm.order_id) FILTER (WHERE cm.order_id IS NOT NULL AND cm.reason = 'nv_payment') as nv_count,
+        COUNT(DISTINCT cm.order_id) as nv_count,
         COALESCE(SUM(CASE WHEN cm.type = 'in' THEN cm.amount ELSE 0 END), 0) - COALESCE(SUM(CASE WHEN cm.type = 'out' THEN cm.amount ELSE 0 END), 0) as net
       FROM cash_movements cm
       JOIN cash_sessions cs ON cm.session_id = cs.id
-      WHERE cm.session_type = 'cash' AND cm.deleted_at IS NULL ${dateFilter}
+      WHERE cm.deleted_at IS NULL ${dateFilter}
     `);
-    res.json(rows[0] || { total_in: 0, total_out: 0, move_count: 0, nv_count: 0, net: 0 });
+    res.json(rows[0] || { total_in: 0, total_out: 0, move_count: 0, nv_count: 0, np_count: 0, net: 0 });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -2490,7 +2506,7 @@ app.get('/api/payment-sessions', async (req, res) => {
     sql += ' ORDER BY cs.opened_at DESC LIMIT 50';
     const { rows } = await pool.query(sql, params);
     for (const s of rows) {
-      const mv = await pool.query("SELECT cm.*, fa.name as account_name, prov.name as provider_name, po.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN financial_accounts fa ON cm.financial_account_id = fa.id LEFT JOIN contacts sup ON cm.supplier_id = sup.id LEFT JOIN orders po ON cm.order_id = po.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [s.id, 'pagos']);
+      const mv = await pool.query("SELECT cm.*, fa.name as account_name, prov.name as provider_name, po.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id LEFT JOIN contacts sup ON cm.supplier_id = sup.id LEFT JOIN orders po ON cm.order_id = po.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [s.id, 'pagos']);
       s.movements = mv.rows;
       s.total_in = mv.rows.filter(m => m.type === 'in').reduce((sum, m) => sum + Number(m.amount), 0);
       s.total_out = mv.rows.filter(m => m.type === 'out').reduce((sum, m) => sum + Number(m.amount), 0);
@@ -2516,7 +2532,7 @@ app.get('/api/payment-sessions/current', async (req, res) => {
     const { rows } = await pool.query("SELECT cs.*, u.name as user_name FROM cash_sessions cs LEFT JOIN users u ON cs.user_id = u.id WHERE cs.user_id = $1 AND cs.status = 'open' AND cs.session_type = 'pagos' ORDER BY cs.opened_at DESC LIMIT 1", [user_id]);
     if (rows.length === 0) return res.json(null);
     const sess = rows[0];
-    const mv = await pool.query("SELECT cm.*, fa.name as account_name, prov.name as provider_name, po.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN financial_accounts fa ON cm.financial_account_id = fa.id LEFT JOIN contacts sup ON cm.supplier_id = sup.id LEFT JOIN orders po ON cm.order_id = po.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [sess.id, 'pagos']);
+    const mv = await pool.query("SELECT cm.*, fa.name as account_name, prov.name as provider_name, po.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id LEFT JOIN contacts sup ON cm.supplier_id = sup.id LEFT JOIN orders po ON cm.order_id = po.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [sess.id, 'pagos']);
     sess.movements = mv.rows;
     sess.total_in = mv.rows.filter(m => m.type === 'in').reduce((sum, m) => sum + Number(m.amount), 0);
     sess.total_out = mv.rows.filter(m => m.type === 'out').reduce((sum, m) => sum + Number(m.amount), 0);
@@ -2536,7 +2552,7 @@ app.post('/api/payment-sessions/:id/close', async (req, res) => {
 
 app.get('/api/payment-movements', async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT cm.*, fa.name as account_name, prov.name as provider_name, po.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN financial_accounts fa ON cm.financial_account_id = fa.id LEFT JOIN contacts sup ON cm.supplier_id = sup.id LEFT JOIN orders po ON cm.order_id = po.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_type = 'pagos' ORDER BY cm.created_at DESC LIMIT 200");
+    const { rows } = await pool.query("SELECT cm.*, fa.name as account_name, prov.name as provider_name, po.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id LEFT JOIN contacts sup ON cm.supplier_id = sup.id LEFT JOIN orders po ON cm.order_id = po.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_type = 'pagos' ORDER BY cm.created_at DESC LIMIT 200");
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
