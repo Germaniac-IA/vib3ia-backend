@@ -1207,7 +1207,16 @@ app.put('/api/orders/:id', authenticate, async (req, res) => {
       'UPDATE orders SET ' + updates.join(', ') + ' WHERE id=$' + idx + ' AND client_id=$' + (idx+1) + ' RETURNING *',
       values
     );
-    res.json(result.rows[0] || null);
+    const updated = result.rows[0];
+    // Sync order status to delivery
+    if (order_status_id !== undefined && updated?.delivery_id) {
+      const deliveryMap = { 1: 'Pendiente', 2: 'En camino', 3: 'Entregado', 4: 'Cancelado' };
+      const newStatus = deliveryMap[Number(order_status_id)];
+      if (newStatus) {
+        await pool.query('UPDATE deliveries SET status = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL', [newStatus, updated.delivery_id]);
+      }
+    }
+    res.json(updated || null);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
