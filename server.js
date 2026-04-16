@@ -2006,6 +2006,113 @@ app.delete('/api/orders/:id/items/:itemId', authenticate, async (req, res) => {
 });
 
 
+
+
+// ─── PRODUCTS STATS ───────────────────────────────────────────
+app.get('/api/products/stats', authenticate, async (req, res) => {
+  try {
+    const { period } = req.query;
+    let dateFilter = '';
+    const params = [req.user.client_id];
+    if (period === 'today') dateFilter = "AND DATE(created_at) = CURRENT_DATE";
+    else if (period === 'week') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
+    else if (period === 'month') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
+
+    const totals = await pool.query(
+      "SELECT COUNT(*) FILTER (WHERE is_active = true) as active_count, COUNT(*) FILTER (WHERE discontinued = 1) as discontinued_count, COALESCE(SUM(stock_quantity) FILTER (WHERE is_active = true), 0) as total_stock, COALESCE(SUM(stock_quantity * price) FILTER (WHERE is_active = true AND requires_stock = true), 0) as inventory_value FROM products WHERE client_id = $1 AND deleted_at IS NULL",
+      params
+    );
+    const lowStock = await pool.query(
+      "SELECT COUNT(*) as low_count FROM products WHERE client_id = $1 AND deleted_at IS NULL AND is_active = true AND requires_stock = true AND stock_quantity <= min_stock",
+      params
+    );
+    const bestSeller = await pool.query(
+      "SELECT p.name, SUM(oi.quantity) as total_sold FROM order_items oi JOIN products p ON oi.product_id = p.id JOIN orders o ON oi.order_id = o.id WHERE p.client_id = $1 AND o.deleted_at IS NULL " + dateFilter + " GROUP BY p.name ORDER BY total_sold DESC LIMIT 1",
+      params
+    );
+    res.json({
+      active_count: parseInt(totals.rows[0]?.active_count || 0),
+      discontinued_count: parseInt(totals.rows[0]?.discontinued_count || 0),
+      total_stock: parseInt(totals.rows[0]?.total_stock || 0),
+      low_stock: parseInt(lowStock.rows[0]?.low_count || 0),
+      inventory_value: parseFloat(totals.rows[0]?.inventory_value || 0),
+      best_seller: bestSeller.rows[0] || null,
+    });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ─── CONTACTS STATS ─────────────────────────────────────────
+app.get('/api/contacts/stats', authenticate, async (req, res) => {
+  try {
+    const { period } = req.query;
+    let dateFilter = '';
+    const params = [req.user.client_id];
+    if (period === 'today') dateFilter = "AND DATE(created_at) = CURRENT_DATE";
+    else if (period === 'week') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
+    else if (period === 'month') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
+
+    const totals = await pool.query(
+      "SELECT COUNT(*) FILTER (WHERE deleted_at IS NULL) as total, COUNT(*) FILTER (WHERE deleted_at IS NOT NULL) as deleted_count, COUNT(*) FILTER (WHERE whatsapp IS NOT NULL AND whatsapp != '') as with_whatsapp, COUNT(*) FILTER (WHERE instagram IS NOT NULL AND instagram != '') as with_instagram, COUNT(*) FILTER (WHERE tiktok IS NOT NULL AND tiktok != '') as with_tiktok, COUNT(*) FILTER (WHERE email IS NOT NULL AND email != '') as with_email FROM contacts WHERE client_id = $1",
+      params
+    );
+    const newContacts = await pool.query(
+      "SELECT COUNT(*) as new_count FROM contacts WHERE client_id = $1 AND deleted_at IS NULL " + dateFilter,
+      params
+    );
+    res.json({
+      total: parseInt(totals.rows[0]?.total || 0),
+      new_count: parseInt(newContacts.rows[0]?.new_count || 0),
+      deleted_count: parseInt(totals.rows[0]?.deleted_count || 0),
+      with_whatsapp: parseInt(totals.rows[0]?.with_whatsapp || 0),
+      with_instagram: parseInt(totals.rows[0]?.with_instagram || 0),
+      with_tiktok: parseInt(totals.rows[0]?.with_tiktok || 0),
+      with_email: parseInt(totals.rows[0]?.with_email || 0),
+    });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ─── LEADS STATS ─────────────────────────────────────────────
+app.get('/api/leads/stats', authenticate, async (req, res) => {
+  try {
+    const { period } = req.query;
+    let dateFilter = '';
+    const params = [req.user.client_id];
+    if (period === 'today') dateFilter = "AND DATE(l.created_at) = CURRENT_DATE";
+    else if (period === 'week') dateFilter = "AND DATE(l.created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
+    else if (period === 'month') dateFilter = "AND DATE(l.created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
+
+    const totals = await pool.query(
+      "SELECT COUNT(*) FILTER (WHERE l.status = 'new') as new_count, COUNT(*) FILTER (WHERE l.status = 'converted') as converted_count, COUNT(*) FILTER (WHERE l.status = 'rejected' OR l.status = 'lost') as lost_count, COUNT(*) FILTER (WHERE l.status = 'contacted') as contacted_count, COUNT(*) FILTER (WHERE l.status = 'waiting') as waiting_count FROM leads l WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter,
+      params
+    );
+    const totalLeads = await pool.query(
+      "SELECT COUNT(*) as total FROM leads l WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter,
+      params
+    );
+    const sources = await pool.query(
+      "SELECT COALESCE(ls.name, 'Sin origen') as source, COUNT(*) as count FROM leads l LEFT JOIN lead_sources ls ON l.source_id = ls.id WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter + " GROUP BY ls.name ORDER BY count DESC LIMIT 5",
+      params
+    );
+    const interactions = await pool.query(
+      "SELECT COUNT(*) as total_interactions FROM lead_interactions li JOIN leads l ON li.lead_id = l.id WHERE l.client_id = $1 AND l.deleted_at IS NULL " + dateFilter,
+      params
+    );
+    const totalLeadsAll = parseInt(totalLeads.rows[0]?.total || 0);
+    const converted = parseInt(totals.rows[0]?.converted_count || 0);
+    res.json({
+      total: totalLeadsAll,
+      new_count: parseInt(totals.rows[0]?.new_count || 0),
+      converted_count: converted,
+      conversion_rate: totalLeadsAll > 0 ? Math.round((converted / totalLeadsAll) * 100) : 0,
+      lost_count: parseInt(totals.rows[0]?.lost_count || 0),
+      contacted_count: parseInt(totals.rows[0]?.contacted_count || 0),
+      waiting_count: parseInt(totals.rows[0]?.waiting_count || 0),
+      sources: sources.rows,
+      total_interactions: parseInt(interactions.rows[0]?.total_interactions || 0),
+    });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
 app.listen(PORT, () => {
   console.log(`\n🚀 VIB3.ia Backend running on http://localhost:${PORT}`);
   console.log(`   Database: ${process.env.DATABASE_URL ? 'configured' : 'NOT CONFIGURED'}`);
