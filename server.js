@@ -851,6 +851,92 @@ app.delete('/api/payment-statuses/:id', authenticate, async (req, res) => {
 });
 
 // ─── ORDERS (VENTAS) ────────────────────────────────────────────────
+// ─── ORDERS STATS ──────────────────────────────────────────────
+app.get('/api/orders/stats', authenticate, async (req, res) => {
+  try {
+    const { period } = req.query; // 'today' | 'week' | 'month' | 'custom'
+    const { from, to } = req.query;
+    
+    let dateFilter = '';
+    const params = [req.user.client_id];
+    
+    if (period === 'today') {
+      dateFilter = "AND DATE(o.created_at) = CURRENT_DATE";
+    } else if (period === 'week') {
+      dateFilter = "AND DATE(o.created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
+    } else if (period === 'month') {
+      dateFilter = "AND DATE(o.created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
+    } else if (period === 'custom' && from && to) {
+      dateFilter = "AND DATE(o.created_at) >= $2 AND DATE(o.created_at) <= $3";
+      params.push(from, to);
+    }
+    
+    // Total count and revenue
+    const totals = await pool.query(`
+      SELECT 
+        COUNT(*) as total_count,
+        COALESCE(SUM(o.total), 0) as total_revenue,
+        COALESCE(SUM(op.paid_sum), 0) as total_collected
+      FROM orders o
+      LEFT JOIN (
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
+        FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+      ) op ON op.order_id = o.id
+      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
+    `, params);
+    
+    // Best seller
+    const bestSeller = await pool.query(`
+      SELECT u.name as seller_name, COUNT(*) as sale_count, COALESCE(SUM(o.total), 0) as revenue
+      FROM orders o
+      LEFT JOIN users u ON o.seller_id = u.id
+      WHERE o.client_id = $1 AND o.deleted_at IS NULL AND o.seller_id IS NOT NULL ${dateFilter}
+      GROUP BY u.name
+      ORDER BY sale_count DESC
+      LIMIT 1
+    `, params);
+    
+    // Payment methods breakdown
+    const paymentBreakdown = await pool.query(`
+      SELECT 
+        pm.name as method_name,
+        COUNT(DISTINCT o.id) as order_count,
+        COALESCE(SUM(op.amount), 0) as collected
+      FROM orders o
+      LEFT JOIN payment_methods pm ON o.payment_method_id = pm.id
+      LEFT JOIN order_payments op ON op.order_id = o.id AND op.deleted_at IS NULL
+      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
+      GROUP BY pm.name
+      ORDER BY collected DESC
+    `, params);
+    
+    // Orders by day (last 7 days or custom range)
+    const byDay = await pool.query(`
+      SELECT 
+        DATE(o.created_at) as day,
+        COUNT(*) as order_count,
+        COALESCE(SUM(o.total), 0) as day_revenue
+      FROM orders o
+      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
+      GROUP BY DATE(o.created_at)
+      ORDER BY day DESC
+      LIMIT 7
+    `, params);
+    
+    res.json({
+      total_count: parseInt(totals.rows[0]?.total_count || 0),
+      total_revenue: parseFloat(totals.rows[0]?.total_revenue || 0),
+      total_collected: parseFloat(totals.rows[0]?.total_collected || 0),
+      total_pending: parseFloat(totals.rows[0]?.total_revenue || 0) - parseFloat(totals.rows[0]?.total_collected || 0),
+      best_seller: bestSeller.rows[0] || null,
+      payment_breakdown: paymentBreakdown.rows.filter(r => r.method_name),
+      by_day: byDay.rows,
+    });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ─── DELETE ORDER (soft) ─────────────────────────────────────
+
 app.get('/api/orders', authenticate, async (req, res) => {
   try {
     const result = await pool.query(`
@@ -917,7 +1003,7 @@ app.get('/api/orders/:id', authenticate, async (req, res) => {
 
     if (!orderResult.rows[0]) return res.status(404).json({ error: 'No encontrado' });
 
-    const items = await pool.query('SELECT * FROM order_items WHERE order_id = $1 AND deleted_at IS NULL', [req.params.id]);
+    const items = await pool.query("SELECT oi.*, COALESCE(p.name, oi.product_name) as product_name FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = $1 AND oi.deleted_at IS NULL", [req.params.id]);
     const payments = await pool.query(`
       SELECT op.id, op.amount, op.paid_at, op.payment_method_id, op.created_at,
              pm.name as payment_method_name
@@ -1711,91 +1797,6 @@ app.post('/api/leads/:id/resolve', authenticate, async (req, res) => {
   }
 });
 
-// ─── ORDERS STATS ──────────────────────────────────────────────
-app.get('/api/orders/stats', authenticate, async (req, res) => {
-  try {
-    const { period } = req.query; // 'today' | 'week' | 'month' | 'custom'
-    const { from, to } = req.query;
-    
-    let dateFilter = '';
-    const params = [req.user.client_id];
-    
-    if (period === 'today') {
-      dateFilter = "AND DATE(o.created_at) = CURRENT_DATE";
-    } else if (period === 'week') {
-      dateFilter = "AND DATE(o.created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
-    } else if (period === 'month') {
-      dateFilter = "AND DATE(o.created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
-    } else if (period === 'custom' && from && to) {
-      dateFilter = "AND DATE(o.created_at) >= $2 AND DATE(o.created_at) <= $3";
-      params.push(from, to);
-    }
-    
-    // Total count and revenue
-    const totals = await pool.query(`
-      SELECT 
-        COUNT(*) as total_count,
-        COALESCE(SUM(o.total), 0) as total_revenue,
-        COALESCE(SUM(op.paid_sum), 0) as total_collected
-      FROM orders o
-      LEFT JOIN (
-        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
-        FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
-      ) op ON op.order_id = o.id
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
-    `, params);
-    
-    // Best seller
-    const bestSeller = await pool.query(`
-      SELECT u.name as seller_name, COUNT(*) as sale_count, COALESCE(SUM(o.total), 0) as revenue
-      FROM orders o
-      LEFT JOIN users u ON o.seller_id = u.id
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL AND o.seller_id IS NOT NULL ${dateFilter}
-      GROUP BY u.name
-      ORDER BY sale_count DESC
-      LIMIT 1
-    `, params);
-    
-    // Payment methods breakdown
-    const paymentBreakdown = await pool.query(`
-      SELECT 
-        pm.name as method_name,
-        COUNT(DISTINCT o.id) as order_count,
-        COALESCE(SUM(op.amount), 0) as collected
-      FROM orders o
-      LEFT JOIN payment_methods pm ON o.payment_method_id = pm.id
-      LEFT JOIN order_payments op ON op.order_id = o.id AND op.deleted_at IS NULL
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
-      GROUP BY pm.name
-      ORDER BY collected DESC
-    `, params);
-    
-    // Orders by day (last 7 days or custom range)
-    const byDay = await pool.query(`
-      SELECT 
-        DATE(o.created_at) as day,
-        COUNT(*) as order_count,
-        COALESCE(SUM(o.total), 0) as day_revenue
-      FROM orders o
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
-      GROUP BY DATE(o.created_at)
-      ORDER BY day DESC
-      LIMIT 7
-    `, params);
-    
-    res.json({
-      total_count: parseInt(totals.rows[0]?.total_count || 0),
-      total_revenue: parseFloat(totals.rows[0]?.total_revenue || 0),
-      total_collected: parseFloat(totals.rows[0]?.total_collected || 0),
-      total_pending: parseFloat(totals.rows[0]?.total_revenue || 0) - parseFloat(totals.rows[0]?.total_collected || 0),
-      best_seller: bestSeller.rows[0] || null,
-      payment_breakdown: paymentBreakdown.rows.filter(r => r.method_name),
-      by_day: byDay.rows,
-    });
-  } catch (error) { res.status(500).json({ error: error.message }); }
-});
-
-// ─── DELETE ORDER (soft) ─────────────────────────────────────
 app.delete('/api/orders/:id', authenticate, async (req, res) => {
   try {
     await pool.query('UPDATE orders SET deleted_at = NOW() WHERE id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
