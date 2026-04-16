@@ -56,7 +56,7 @@ function appendUniqueNote(base, extra) {
   const right = cleanText(extra);
   if (!left) return right;
   if (!right || left.includes(right)) return left;
-  return `${left}\n\n${right}`;
+  return `${left}[req.user.client_id, name, is_active !== false, sort_order || 0, has_delivery === true]\n${right}`;
 }
 
 function parseJsonOrNull(value) {
@@ -772,7 +772,7 @@ app.delete('/api/contacts/:id', authenticate, async (req, res) => {
 app.get('/api/sale-channels', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT * FROM sale_channels WHERE deleted_at IS NULL AND client_id = $1 AND is_active = true ORDER BY sort_order, name',
+      'SELECT id, name, is_active, sort_order, COALESCE(has_delivery, false) as has_delivery FROM sale_channels WHERE deleted_at IS NULL AND client_id = $1 AND is_active = true ORDER BY sort_order, name',
       [req.user.client_id]
     );
     res.json(result.rows);
@@ -781,10 +781,10 @@ app.get('/api/sale-channels', authenticate, async (req, res) => {
 
 app.post('/api/sale-channels', authenticate, async (req, res) => {
   try {
-    const { name, is_active, sort_order } = req.body;
+    const { name, is_active, sort_order, has_delivery } = req.body;
     const result = await pool.query(
-      'INSERT INTO sale_channels (client_id, name, is_active, sort_order) VALUES ($1, $2, $3, $4) RETURNING *',
-      [req.user.client_id, name, is_active !== false, sort_order || 0]
+      'INSERT INTO sale_channels (client_id, name, is_active, sort_order, has_delivery) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [req.user.client_id, name, is_active !== false, sort_order || 0, has_delivery === true]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -792,10 +792,10 @@ app.post('/api/sale-channels', authenticate, async (req, res) => {
 
 app.put('/api/sale-channels/:id', authenticate, async (req, res) => {
   try {
-    const { name, is_active, sort_order } = req.body;
+    const { name, is_active, sort_order, has_delivery } = req.body;
     const result = await pool.query(
-      'UPDATE sale_channels SET name=COALESCE($1,name), is_active=COALESCE($2,is_active), sort_order=COALESCE($3,sort_order) WHERE id=$4 AND client_id=$5 RETURNING *',
-      [name, is_active, sort_order, req.params.id, req.user.client_id]
+      'UPDATE sale_channels SET name=COALESCE($1,name), is_active=COALESCE($2,is_active), sort_order=COALESCE($3,sort_order), has_delivery=COALESCE($4,has_delivery) WHERE id=$5 AND client_id=$6 RETURNING *',
+      [name, is_active, sort_order, has_delivery, req.params.id, req.user.client_id]
     );
     res.json(result.rows[0] || null);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -1139,11 +1139,19 @@ app.post('/api/orders', authenticate, async (req, res) => {
       );
     }
 
-    if (delivery && (delivery.address || delivery.scheduled_date)) {
-      await client.query(
-        'INSERT INTO deliveries (order_id, address, location, scheduled_date, scheduled_time, delivery_fee, notes) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [orderId, delivery.address, delivery.location, delivery.scheduled_date, delivery.scheduled_time, fee, delivery.notes]
+    // Auto-create delivery if sale_channel has has_delivery = true
+    if (sale_channel_id) {
+      const channelRow = await client.query(
+        'SELECT has_delivery FROM sale_channels WHERE id = $1 AND deleted_at IS NULL',
+        [sale_channel_id]
       );
+      if (channelRow.rows[0]?.has_delivery) {
+        await client.query(
+          `INSERT INTO deliveries (order_id, address, location, scheduled_date, scheduled_time, delivery_fee, notes, client_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [orderId, delivery?.address || '', delivery?.location || '', delivery?.scheduled_date || null, delivery?.scheduled_time || '', fee, delivery?.notes || '', req.user.client_id]
+        );
+      }
     }
 
     await client.query('COMMIT');
@@ -2789,6 +2797,6 @@ app.get('/api/deliveries/stats', async (req, res) => {
 
 
 app.listen(PORT, () => {
-  console.log(`\n🚀 VIB3.ia Backend running on http://localhost:${PORT}`);
+  console.log(`[req.user.client_id, name, is_active !== false, sort_order || 0, has_delivery === true]🚀 VIB3.ia Backend running on http://localhost:${PORT}`);
   console.log(`   Database: ${process.env.DATABASE_URL ? 'configured' : 'NOT CONFIGURED'}`);
 });
