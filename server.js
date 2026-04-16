@@ -2634,6 +2634,140 @@ app.get('/api/payment/stats', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ===================== DELIVERIES =====================
+// GET /api/deliveries - list with order info + contact + status color
+app.get('/api/deliveries', async (req, res) => {
+  try {
+    const { status, period } = req.query;
+    const clientId = req.user?.client_id || 1;
+    let dateFilter = '';
+    if (period === 'today') dateFilter = " AND DATE(d.created_at) = CURRENT_DATE";
+    else if (period === 'week') dateFilter = " AND d.created_at >= CURRENT_DATE - INTERVAL '7 days'";
+    else if (period === 'month') dateFilter = " AND d.created_at >= CURRENT_DATE - INTERVAL '30 days'";
+    let statusFilter = status ? ` AND d.status = '${status}'` : '';
+    const { rows } = await pool.query(
+      `SELECT d.id, d.order_id, d.address, d.scheduled_date, d.delivered_date,
+              d.status, d.notes, d.created_at, d.delivery_fee,
+              o.order_number, o.total as order_total, o.order_status_id,
+              c.name as contact_name, c.phone as contact_phone, c.address as contact_addr,
+              ds.name as status_name, ds.color as status_color
+       FROM deliveries d
+       JOIN orders o ON d.order_id = o.id
+       LEFT JOIN contacts c ON d.contact_id = c.id
+       LEFT JOIN delivery_statuses ds ON ds.name = d.status
+       WHERE d.client_id = $1 AND d.deleted_at IS NULL${dateFilter}${statusFilter}
+       ORDER BY d.created_at DESC`,
+      [clientId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/deliveries - create from existing order
+app.post('/api/deliveries', async (req, res) => {
+  try {
+    const { order_id, address, scheduled_date, notes, delivery_fee } = req.body;
+    const clientId = req.user?.client_id || 1;
+    if (!order_id) return res.status(400).json({ error: 'order_id requerido' });
+    const orderRow = await pool.query('SELECT contact_id FROM orders WHERE id = $1', [order_id]);
+    if (!orderRow.rows[0]) return res.status(404).json({ error: 'Pedido no encontrado' });
+    const { rows } = await pool.query(
+      `INSERT INTO deliveries (client_id, order_id, contact_id, address, scheduled_date, notes, delivery_fee, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'Pendiente') RETURNING *`,
+      [clientId, order_id, orderRow.rows[0].contact_id, address || '', scheduled_date || null, notes || '', delivery_fee || 0]
+    );
+    await pool.query('UPDATE orders SET delivery_id = $1 WHERE id = $2', [rows[0].id, order_id]);
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/deliveries/:id
+app.get('/api/deliveries/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT d.*, o.order_number, o.total as order_total, c.name as contact_name, c.phone as contact_phone
+       FROM deliveries d JOIN orders o ON d.order_id = o.id LEFT JOIN contacts c ON d.contact_id = c.id
+       WHERE d.id = $1 AND d.deleted_at IS NULL`, [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'No encontrada' });
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// PUT /api/deliveries/:id
+app.put('/api/deliveries/:id', async (req, res) => {
+  try {
+    const { address, scheduled_date, status, notes, delivery_fee } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE deliveries SET address = COALESCE($1, address), scheduled_date = COALESCE($2, scheduled_date),
+       status = COALESCE($3, status), notes = COALESCE($4, notes), delivery_fee = COALESCE($5, delivery_fee), updated_at = NOW()
+       WHERE id = $6 AND deleted_at IS NULL RETURNING *`,
+      [address, scheduled_date, status, notes, delivery_fee, req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'No encontrada' });
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/deliveries/:id/confirm - confirm delivery (one-click like leads→clients)
+app.post('/api/deliveries/:id/confirm', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE deliveries SET status = 'Entregado', delivered_date = CURRENT_DATE, updated_at = NOW()
+       WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'No encontrada' });
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/deliveries/:id/cancel - cancel delivery + rollback stock + cancel order
+app.post('/api/deliveries/:id/cancel', async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const d = await client.query('SELECT order_id FROM deliveries WHERE id = $1 AND deleted_at IS NULL', [req.params.id]);
+    if (!d.rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'No encontrada' }); }
+    const orderId = d.rows[0].order_id;
+    // Rollback stock for each order item
+    const items = await client.query('SELECT product_id, quantity FROM order_items WHERE order_id = $1 AND deleted_at IS NULL', [orderId]);
+    for (const item of items.rows) {
+      await client.query('UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2', [item.quantity, item.product_id]);
+    }
+    // Cancel delivery
+    await client.query("UPDATE deliveries SET status = 'Cancelado', updated_at = NOW() WHERE id = $1", [req.params.id]);
+    await client.query("UPDATE orders SET order_status_id = 4 WHERE id = $1", [orderId]);
+    await client.query('COMMIT');
+    res.json({ success: true, order_id: orderId, items_restored: items.rows.length });
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/deliveries/stats - summary for dashboard
+app.get('/api/deliveries/stats', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { rows } = await pool.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE status = 'Pendiente') as pending_count,
+         COUNT(*) FILTER (WHERE status = 'En camino') as in_transit_count,
+         COUNT(*) FILTER (WHERE status = 'Entregado') as delivered_count,
+         COUNT(*) FILTER (WHERE status = 'Cancelado') as cancelled_count,
+         COUNT(*) as total_count
+       FROM deliveries WHERE client_id = $1 AND deleted_at IS NULL`,
+      [clientId]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+
 
 app.listen(PORT, () => {
   console.log(`\n🚀 VIB3.ia Backend running on http://localhost:${PORT}`);
