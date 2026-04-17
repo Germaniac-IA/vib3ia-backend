@@ -2638,14 +2638,38 @@ app.get('/api/purchase-orders/stats', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.put('/api/purchase-orders/:id', async (req, res) => {
+app.put('/api/purchase-orders/:id', authenticate, async (req, res) => {
   try {
-    const { status_id, payment_status_id, notes } = req.body;
+    const { status_id, payment_status_id, notes, provider_id, delivery_fee, discount_type, discount_value, items } = req.body;
+    // Check current status — don't allow full edit if Recibido
+    const { rows: curr } = await pool.query("SELECT ps.name as status_name FROM purchase_orders po JOIN purchase_statuses ps ON po.status_id = ps.id WHERE po.id = $1 AND po.deleted_at IS NULL", [req.params.id]);
+    if (!curr[0]) return res.status(404).json({ error: 'NP no encontrada' });
+    if (curr[0].status_name === 'Recibido') return res.status(400).json({ error: 'No se puede editar una NP Recibida' });
     const updates = [];
     const params = [];
     if (status_id !== undefined) { params.push(status_id); updates.push(`status_id = $${params.length}`); }
     if (payment_status_id !== undefined) { params.push(payment_status_id); updates.push(`payment_status_id = $${params.length}`); }
     if (notes !== undefined) { params.push(notes); updates.push(`notes = $${params.length}`); }
+    if (provider_id !== undefined) { params.push(provider_id); updates.push(`provider_id = $${params.length}`); }
+    if (delivery_fee !== undefined) { params.push(delivery_fee); updates.push(`delivery_fee = $${params.length}`); }
+    if (discount_type !== undefined) { params.push(discount_type); updates.push(`discount_type = $${params.length}`); }
+    if (discount_value !== undefined) { params.push(discount_value); updates.push(`discount_value = $${params.length}`); }
+    if (items !== undefined) {
+      // Recalculate totals
+      const subtotal = items.reduce((s, i) => s + i.quantity * i.unit_price, 0);
+      let disc = 0;
+      if (discount_type === 'percent' && discount_value) disc = subtotal * (discount_value / 100);
+      else if (discount_type === 'fixed') disc = discount_value || 0;
+      const total = Math.max(0, subtotal - disc + (delivery_fee || 0));
+      params.push(subtotal); updates.push(`subtotal = $${params.length}`);
+      params.push(disc); updates.push(`discount_value = $${params.length}`);
+      params.push(total); updates.push(`total = $${params.length}`);
+      // Replace items
+      await pool.query("DELETE FROM purchase_order_items WHERE order_id = $1", [req.params.id]);
+      for (const item of items) {
+        await pool.query("INSERT INTO purchase_order_items (order_id, product_id, input_item_id, product_name, quantity, unit_price, subtotal) VALUES ($1, $2, $3, $4, $5, $6, $7)", [req.params.id, item.product_id || null, item.input_item_id || null, item.product_name, item.quantity, item.unit_price, item.quantity * item.unit_price]);
+      }
+    }
     if (updates.length === 0) return res.status(400).json({ error: 'Nada que actualizar' });
     params.push(req.params.id);
     await pool.query(`UPDATE purchase_orders SET ${updates.join(', ')} WHERE id = $${params.length} AND deleted_at IS NULL`, params);
@@ -2692,6 +2716,42 @@ app.post('/api/purchase-orders/:id/receive', async (req, res) => {
     }
     res.json({ ok: true, message: 'NP marcada como recibida, stock actualizado' });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// GET /api/purchase-orders/unpaid - list purchase orders with pending payments (for Pagos NP selector)
+app.get('/api/purchase-orders/unpaid', authenticate, async (req, res) => {
+  try {
+    const { provider_id } = req.query;
+    let sql = `
+      SELECT
+        po.id,
+        po.order_number,
+        po.total,
+        prov.name AS provider_name,
+        COALESCE(SUM(op.amount), 0) AS payment_paid,
+        (po.total - COALESCE(SUM(op.amount), 0)) AS payment_pending
+      FROM purchase_orders po
+      LEFT JOIN providers prov ON po.provider_id = prov.id
+      LEFT JOIN order_payments op ON op.order_id = po.id AND op.deleted_at IS NULL
+      WHERE po.deleted_at IS NULL
+    `;
+    const params = [];
+    if (provider_id) {
+      params.push(provider_id);
+      sql += ` AND po.provider_id = $${params.length}`;
+    }
+    sql += `
+      GROUP BY po.id, po.order_number, po.total, prov.name
+      HAVING (po.total - COALESCE(SUM(op.amount), 0)) > 0
+      ORDER BY po.created_at DESC
+      LIMIT 100
+    `;
+    const { rows } = await pool.query(sql, params);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.get('/api/purchase-orders/:id', async (req, res) => {
