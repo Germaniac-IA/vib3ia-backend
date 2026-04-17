@@ -896,7 +896,7 @@ app.get('/api/orders/stats', authenticate, async (req, res) => {
     const { from, to } = req.query;
     
     let dateFilter = '';
-    const params = [req.user.client_id];
+    const params = [];
     
     if (period === 'today') {
       dateFilter = "AND DATE(o.created_at) = CURRENT_DATE";
@@ -928,7 +928,7 @@ app.get('/api/orders/stats', authenticate, async (req, res) => {
       SELECT u.name as seller_name, COUNT(*) as sale_count, COALESCE(SUM(o.total), 0) as revenue
       FROM orders o
       LEFT JOIN users u ON o.seller_id = u.id
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL AND o.seller_id IS NOT NULL ${dateFilter}
+      WHERE o.deleted_at IS NULL AND o.seller_id IS NOT NULL ${dateFilter}
       GROUP BY u.name
       ORDER BY sale_count DESC
       LIMIT 1
@@ -943,7 +943,7 @@ app.get('/api/orders/stats', authenticate, async (req, res) => {
       FROM orders o
       LEFT JOIN payment_methods pm ON o.payment_method_id = pm.id
       LEFT JOIN order_payments op ON op.order_id = o.id AND op.deleted_at IS NULL
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
+      WHERE o.deleted_at IS NULL ${dateFilter}
       GROUP BY pm.name
       ORDER BY collected DESC
     `, params);
@@ -955,7 +955,7 @@ app.get('/api/orders/stats', authenticate, async (req, res) => {
         COUNT(*) as order_count,
         COALESCE(SUM(o.total), 0) as day_revenue
       FROM orders o
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
+      WHERE o.deleted_at IS NULL ${dateFilter}
       GROUP BY DATE(o.created_at)
       ORDER BY day DESC
       LIMIT 7
@@ -1001,7 +1001,7 @@ app.get('/api/orders', authenticate, async (req, res) => {
         SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
         FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL
+      WHERE o.deleted_at IS NULL
       ORDER BY o.created_at DESC
     `, [req.user.client_id]);
     res.json(result.rows);
@@ -1015,7 +1015,7 @@ app.get('/api/orders/unpaid', authenticate, async (req, res) => {
   try {
     const { contact_id } = req.query;
     let contactFilter = '';
-    let params = [req.user.client_id];
+    let params = [];
     if (contact_id) { contactFilter = ' AND o.contact_id = $2'; params.push(contact_id); }
     const result = await pool.query(`
       SELECT
@@ -1030,7 +1030,7 @@ app.get('/api/orders/unpaid', authenticate, async (req, res) => {
         SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
         FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL
+      WHERE o.deleted_at IS NULL
         AND (o.total - COALESCE(op.paid_sum, 0)) > 0
         ${contactFilter}
       ORDER BY o.created_at DESC
@@ -2099,7 +2099,7 @@ app.get('/api/products/stats', authenticate, async (req, res) => {
   try {
     const { period } = req.query;
     let dateFilter = '';
-    const params = [req.user.client_id];
+    const params = [];
     if (period === 'today') dateFilter = "AND DATE(created_at) = CURRENT_DATE";
     else if (period === 'week') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
     else if (period === 'month') dateFilter = "AND DATE(created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
@@ -2132,7 +2132,7 @@ app.get('/api/contacts/stats', authenticate, async (req, res) => {
   try {
     const { period } = req.query;
     let dateFilter = '';
-    const params = [req.user.client_id];
+    const params = [];
     if (period === 'today') dateFilter = "AND DATE(c.created_at) = CURRENT_DATE";
     else if (period === 'week') dateFilter = "AND DATE(c.created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
     else if (period === 'month') dateFilter = "AND DATE(c.created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
@@ -2162,7 +2162,7 @@ app.get('/api/leads/stats', authenticate, async (req, res) => {
   try {
     const { period } = req.query;
     let dateFilter = '';
-    const params = [req.user.client_id];
+    const params = [];
     if (period === 'today') dateFilter = "AND DATE(l.created_at) = CURRENT_DATE";
     else if (period === 'week') dateFilter = "AND DATE(l.created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
     else if (period === 'month') dateFilter = "AND DATE(l.created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
