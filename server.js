@@ -2222,7 +2222,7 @@ app.get('/api/cash-sessions/open', authenticate, async (req, res) => {
 });
 
 // POST /api/cash-sessions/:id/join - join another user's open session
-app.post('/api/cash-sessions/:id/join', async (req, res) => {
+app.post('/api/cash-sessions/:id/join', authenticate, async (req, res) => {
   try {
     const user_id = req.user?.id || 1;
     const session_id = req.params.id;
@@ -2939,7 +2939,7 @@ app.get('/api/cash-sessions/open', authenticate, async (req, res) => {
 });
 
 // POST /api/cash-sessions/:id/join - join an existing open session
-app.post('/api/cash-sessions/:id/join', async (req, res) => {
+app.post('/api/cash-sessions/:id/join', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(
       "SELECT id FROM cash_sessions WHERE id=$1 AND status='open' AND deleted_at IS NULL",
