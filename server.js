@@ -503,7 +503,7 @@ app.get('/api/products', authenticate, async (req, res) => {
       LEFT JOIN product_brands pb ON p.brand_id = pb.id
       WHERE p.client_id = $1 AND ${activeFilter} AND p.deleted_at IS NULL
       ORDER BY p.name
-    `, [req.user.client_id]);
+    `);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -920,7 +920,7 @@ app.get('/api/orders/stats', authenticate, async (req, res) => {
         SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
         FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
-      WHERE o.client_id = $1 AND o.deleted_at IS NULL ${dateFilter}
+      WHERE o.deleted_at IS NULL ${dateFilter}
     `, params);
     
     // Best seller
