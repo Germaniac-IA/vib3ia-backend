@@ -2431,7 +2431,7 @@ app.get('/api/cash-movements', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/cash-movements', async (req, res) => {
+app.post('/api/cash-movements', authenticate, async (req, res) => {
   try {
     const { financial_account_id, type = 'in', reason = 'other_in', order_id, contact_id, supplier_id, purchase_order_id, amount, notes } = req.body;
     if (!financial_account_id || !amount) return res.status(400).json({ error: 'Faltan campos requeridos' });
