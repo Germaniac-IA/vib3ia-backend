@@ -1239,12 +1239,14 @@ app.put('/api/orders/:id', authenticate, async (req, res) => {
       values
     );
     const updated = result.rows[0];
-    // Sync order status to delivery
+    // Sync order status to delivery (match by name, not by hardcoded ID)
     if (order_status_id !== undefined && updated?.delivery_id) {
-      const deliveryMap = { 1: 'Pendiente', 2: 'En Camino', 3: 'Entregado', 4: 'Cancelado' };
-      const newStatus = deliveryMap[Number(order_status_id)];
-      if (newStatus) {
-        await pool.query('UPDATE deliveries SET status = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL', [newStatus, updated.delivery_id]);
+      const statusRes = await pool.query('SELECT name FROM order_statuses WHERE id = $1 AND deleted_at IS NULL', [order_status_id]);
+      const statusName = statusRes.rows[0]?.name;
+      const deliveryStatusMap = { 'Pendiente': 'Pendiente', 'En Proceso': 'En Camino', 'En Camino': 'En Camino', 'Entregado': 'Entregado', 'Cancelado': 'Cancelado' };
+      const newDeliveryStatus = deliveryStatusMap[statusName];
+      if (newDeliveryStatus) {
+        await pool.query('UPDATE deliveries SET status = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL', [newDeliveryStatus, updated.delivery_id]);
       }
     }
     res.json(updated || null);
