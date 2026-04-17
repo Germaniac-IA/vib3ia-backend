@@ -2271,11 +2271,12 @@ app.get('/api/cash-sessions/current', authenticate, async (req, res) => {
     sess.movements = mv.rows;
     sess.total_in = mv.rows.filter(m => m.type === 'in').reduce((sum, m) => sum + Number(m.amount), 0);
     sess.total_out = mv.rows.filter(m => m.type === 'out').reduce((sum, m) => sum + Number(m.amount), 0);
+    sess.my_user_id = req.user?.id;
     res.json(sess);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/cash-sessions/:id/close', async (req, res) => {
+app.post('/api/cash-sessions/:id/close', authenticate, async (req, res) => {
   try {
     const { final_amount = 0, total_cash = 0, total_digital = 0, total_other = 0, notes = '' } = req.body;
     const diff = Number(final_amount);
@@ -2294,8 +2295,8 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
     }
 
     await pool.query(
-      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=CAST($8 AS INTEGER) AND status='open' AND deleted_at IS NULL",
-      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', parseInt(session_id)]
+      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=$8 AND status='open' AND deleted_at IS NULL",
+      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', session_id]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2307,6 +2308,74 @@ app.post('/api/cash-sessions/leave', authenticate, async (req, res) => {
     const user_id = req.user?.id;
     if (!user_id) return res.status(401).json({ error: 'No autorizado' });
     await pool.query("UPDATE users SET joined_session_id = NULL WHERE id = $1", [user_id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// ===================== CLIENT ADVANCES =====================
+// GET /api/client-advances - list advances for a client
+app.get('/api/client-advances', authenticate, async (req, res) => {
+  try {
+    const { client_id } = req.query;
+    let query = "SELECT ca.*, c.name as client_name FROM client_advances ca LEFT JOIN contacts c ON ca.client_id = c.id WHERE ca.deleted_at IS NULL AND ca.remaining > 0";
+    let params = [];
+    if (client_id) { query += " AND ca.client_id = $1"; params.push(client_id); }
+    query += " ORDER BY ca.created_at DESC";
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/client-advances/by-client/:clientId - all advances for a client (including used up)
+app.get('/api/client-advances/by-client/:clientId', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT ca.*, c.name as client_name FROM client_advances ca LEFT JOIN contacts c ON ca.client_id = c.id WHERE ca.client_id = $1 AND ca.deleted_at IS NULL ORDER BY ca.created_at DESC",
+      [parseInt(req.params.clientId)]
+    );
+    res.json(result.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/client-advances - create a new advance
+app.post('/api/client-advances', authenticate, async (req, res) => {
+  try {
+    const { client_id, amount, notes = '' } = req.body;
+    if (!client_id || !amount) return res.status(400).json({ error: "Faltan campos requeridos" });
+    const remaining = Number(amount);
+    const result = await pool.query(
+      "INSERT INTO client_advances (client_id, amount, used_amount, remaining, notes, created_by) VALUES ($1, $2, 0, $2, $3, $4) RETURNING *",
+      [client_id, remaining, notes, req.user?.id || 1]
+    );
+    res.json(result.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/client-advances/:id/use - use (consume) part of an advance
+app.post('/api/client-advances/:id/use', authenticate, async (req, res) => {
+  try {
+    const { amount } = req.body;
+    const id = parseInt(req.params.id);
+    const advance = await pool.query("SELECT * FROM client_advances WHERE id = $1 AND deleted_at IS NULL", [id]);
+    if (!advance.rows.length) return res.status(404).json({ error: "Anticipo no encontrado" });
+    const curr = advance.rows[0];
+    const useAmt = Math.min(Number(amount), curr.remaining);
+    if (useAmt <= 0) return res.status(400).json({ error: "Monto inválido o anticipo agotado" });
+    const newRemaining = curr.remaining - useAmt;
+    const newUsed = curr.used_amount + useAmt;
+    await pool.query(
+      "UPDATE client_advances SET remaining = $1, used_amount = $2, updated_at = NOW() WHERE id = $3",
+      [newRemaining, newUsed, id]
+    );
+    res.json({ ok: true, used: useAmt, remaining: newRemaining });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE /api/client-advances/:id - soft delete
+app.delete('/api/client-advances/:id', authenticate, async (req, res) => {
+  try {
+    await pool.query("UPDATE client_advances SET deleted_at = NOW() WHERE id = $1", [parseInt(req.params.id)]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2977,7 +3046,7 @@ app.post('/api/cash-sessions/:id/join', authenticate, async (req, res) => {
 });
 
 // POST /api/cash-sessions/:id/close - close a cash session (only if no other users joined)
-app.post('/api/cash-sessions/:id/close', async (req, res) => {
+app.post('/api/cash-sessions/:id/close', authenticate, async (req, res) => {
   try {
     const { final_amount = 0, total_cash = 0, total_digital = 0, total_other = 0, notes = '' } = req.body;
     const diff = Number(final_amount);
@@ -2996,8 +3065,8 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
     }
 
     await pool.query(
-      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=CAST($8 AS INTEGER) AND status='open' AND deleted_at IS NULL",
-      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', parseInt(session_id)]
+      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=$8 AND status='open' AND deleted_at IS NULL",
+      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', session_id]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
