@@ -2480,7 +2480,7 @@ app.post('/api/cash-movements', authenticate, async (req, res) => {
         } else if (paid < totalOrder) {
           statusId = statusRows.rows.find(r => r.name.includes('parcial'))?.id || statusRows.rows[1]?.id || statusRows.rows[0]?.id || null;
         } else {
-          statusId = statusRows.rows.find(r => r.name == 'cobrado' || r.name.includes('cobrado'))?.id || statusRows.rows[statusRows.rows.length - 1]?.id || null;
+          statusId = statusRows.rows.find(r => r.name == 'cobrado')?.id || statusRows.rows.find(r => r.name.includes('cobrado') && !r.name.includes('parcial'))?.id || statusRows.rows[statusRows.rows.length - 1]?.id || null;
         }
 
         if (statusId) {
