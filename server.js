@@ -2280,7 +2280,23 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
     const { final_amount = 0, total_cash = 0, total_digital = 0, total_other = 0, notes = '' } = req.body;
     const diff = Number(final_amount);
     const status2 = diff === 0 ? 'balanced' : diff > 0 ? 'surplus' : 'deficit';
-    await pool.query("UPDATE cash_sessions SET status = 'closed', closed_at = NOW(), final_amount = $1, total_cash = $2, total_digital = $3, total_other = $4, diff = $5, status2 = $6, notes = $7 WHERE id = $8 AND session_type = 'cash'", [final_amount, total_cash, total_digital, total_other, diff, status2, notes, req.params.id]);
+    const session_id = req.params.id;
+
+    const others = await pool.query(
+      "SELECT id, name FROM users WHERE joined_session_id = $1 AND deleted_at IS NULL",
+      [session_id]
+    );
+    if (others.rows.length > 0) {
+      const names = others.rows.map(r => r.name).join(", ");
+      return res.status(400).json({
+        error: "Otros usuarios todavia tienen la caja abierta: " + names + ". Todos deben cerrarla o salir primero."
+      });
+    }
+
+    await pool.query(
+      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=$8 AND status='open' AND deleted_at IS NULL",
+      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', session_id]
+    );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
