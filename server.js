@@ -2222,7 +2222,7 @@ app.get('/api/cash-sessions/open', authenticate, async (req, res) => {
 });
 
 // POST /api/cash-sessions/:id/join - join another user's open session
-app.post('/api/cash-sessions/:id/join', authenticate, async (req, res) => {
+app.post('/api/cash-sessions/:id/join', async (req, res) => {
   try {
     const user_id = req.user?.id || 1;
     const session_id = req.params.id;
@@ -2280,27 +2280,10 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
     const { final_amount = 0, total_cash = 0, total_digital = 0, total_other = 0, notes = '' } = req.body;
     const diff = Number(final_amount);
     const status2 = diff === 0 ? 'balanced' : diff > 0 ? 'surplus' : 'deficit';
-    const session_id = req.params.id;
-
-    // Check if other users are joined to this session
-    const others = await pool.query(
-      "SELECT id, name FROM users WHERE joined_session_id = $1 AND deleted_at IS NULL",
-      [session_id]
-    );
-    if (others.rows.length > 0) {
-      const names = others.rows.map(r => r.name).join(", ");
-      return res.status(400).json({
-        error: `Otros usuarios ainda tienen la caja abierta: ${names}. Todos deben cerrarla o salir primero.`
-      });
-    }
-
-    await pool.query(
-      "UPDATE cash_sessions SET status = 'closed', closed_at = NOW(), final_amount = $1, total_cash = $2, total_digital = $3, total_other = $4, diff = $5, status2 = $6, notes = $7 WHERE id = $8 AND session_type = 'cash'",
-      [final_amount, total_cash, total_digital, total_other, diff, status2, notes, session_id]
-    );
+    await pool.query("UPDATE cash_sessions SET status = 'closed', closed_at = NOW(), final_amount = $1, total_cash = $2, total_digital = $3, total_other = $4, diff = $5, status2 = $6, notes = $7 WHERE id = $8 AND session_type = 'cash'", [final_amount, total_cash, total_digital, total_other, diff, status2, notes, req.params.id]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
-});});
+});
 
 // Cash Movements (Cobros)
 app.get('/api/cash-movements', async (req, res) => {
@@ -2892,6 +2875,125 @@ app.get('/api/deliveries/stats', async (req, res) => {
 
 
 
+// ===================== CASH SESSIONS =====================
+// POST /api/cash-sessions - open a new cash session
+app.post('/api/cash-sessions', authenticate, async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const userId = req.user?.id;
+    const { initial_amount } = req.body || {};
+    // Check if there's already an open session for this client
+    const existing = await pool.query(
+      "SELECT id FROM cash_sessions WHERE client_id=$1 AND status='open' AND deleted_at IS NULL",
+      [clientId]
+    );
+    if (existing.rows[0]) {
+      return res.status(409).json({ error: 'Ya hay una caja abierta', session_id: existing.rows[0].id });
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO cash_sessions (client_id, created_by, initial_amount, status, session_type)
+       VALUES ($1, $2, $3, 'open', 'cash') RETURNING *`,
+      [clientId, userId || null, initial_amount || 0]
+    );
+    res.status(201).json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/cash-sessions/current - get current open session for this client
+app.get('/api/cash-sessions/current', authenticate, async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { rows } = await pool.query(
+      `SELECT cs.*, u.name as user_name,
+              (SELECT COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_in,
+              (SELECT COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_out
+       FROM cash_sessions cs
+       LEFT JOIN users u ON cs.user_id = u.id
+       WHERE cs.client_id=$1 AND cs.status='open' AND cs.deleted_at IS NULL
+       ORDER BY cs.opened_at DESC LIMIT 1`,
+      [clientId]
+    );
+    if (!rows[0]) return res.json(null);
+    const net = Number(rows[0].total_in || 0) - Number(rows[0].total_out || 0);
+    res.json({ ...rows[0], net });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/cash-sessions/open - list other users' open sessions
+app.get('/api/cash-sessions/open', authenticate, async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { rows } = await pool.query(
+      `SELECT cs.id, cs.session_type, cs.opened_at, cs.initial_amount,
+              u.name as user_name, u.id as user_id,
+              (SELECT COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_in,
+              (SELECT COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_out
+       FROM cash_sessions cs
+       LEFT JOIN users u ON cs.user_id = u.id
+       WHERE cs.client_id=$1 AND cs.status='open' AND cs.deleted_at IS NULL
+       ORDER BY cs.opened_at DESC`,
+      [clientId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/cash-sessions/:id/join - join an existing open session
+app.post('/api/cash-sessions/:id/join', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT id FROM cash_sessions WHERE id=$1 AND status='open' AND deleted_at IS NULL",
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Sesion no encontrada o cerrada' });
+    res.json({ success: true, session_id: req.params.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/cash-sessions/:id/close - close a cash session
+app.post('/api/cash-sessions/:id/close', async (req, res) => {
+  try {
+    const { final_amount, total_cash, total_digital, total_other, notes } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1,
+       total_cash=$2, total_digital=$3, total_other=$4, notes=$5, updated_at=NOW()
+       WHERE id=$6 AND status='open' AND deleted_at IS NULL RETURNING *`,
+      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, notes || '', req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Sesion no encontrada o ya cerrada' });
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ===================== CASH MOVEMENTS =====================
+// GET /api/cash-movements - list with filters
+app.get('/api/cash-movements', async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { type, period, session_id } = req.query;
+    let dateFilter = '';
+    if (period === 'today') dateFilter = " AND DATE(cm.created_at) = CURRENT_DATE";
+    else if (period === 'week') dateFilter = " AND cm.created_at >= CURRENT_DATE - INTERVAL '7 days'";
+    else if (period === 'month') dateFilter = " AND cm.created_at >= CURRENT_DATE - INTERVAL '30 days'";
+    let typeFilter = type ? ` AND cm.type = '${type}'` : '';
+    let sessionFilter = session_id ? ` AND cm.session_id = ${session_id}` : '';
+    const { rows } = await pool.query(
+      `SELECT cm.id, cm.type, cm.amount, cm.reason, cm.reference, cm.notes, cm.created_at,
+              u.name as user_name,
+              COALESCE(c.name, co.supplier_name, '') as counterparty_name,
+              COALESCE(cm.order_number, '') as order_number,
+              COALESCE(cm.client_name, '') as client_name
+       FROM cash_movements cm
+       LEFT JOIN users u ON cm.created_by = u.id
+       LEFT JOIN contacts c ON cm.contact_id = c.id
+       LEFT JOIN providers co ON cm.supplier_id = co.id
+       WHERE cm.client_id=$1 AND cm.deleted_at IS NULL${dateFilter}${typeFilter}${sessionFilter}
+       ORDER BY cm.created_at DESC`,
+      [clientId]
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // POST /api/cash-movements - create a movement
 app.post('/api/cash-movements', async (req, res) => {
