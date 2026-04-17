@@ -2461,23 +2461,31 @@ app.post('/api/cash-movements', authenticate, async (req, res) => {
     const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES (COALESCE($1, (SELECT id FROM cash_sessions WHERE status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1)), 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null]);
     if (reason === 'nv_payment' && order_id) {
       await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [order_id, financial_account_id, amount]);
-      // Update payment_status_id based on paid sum
-      const orderRes = await pool.query('SELECT total FROM orders WHERE id = $1', [order_id]);
-      if (orderRes.rows.length > 0) {
-        const paidRes = await pool.query('SELECT COALESCE(SUM(amount), 0) as total FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL', [order_id]);
-        const paid = Number(paidRes.rows[0].total);
-        const total = Number(orderRes.rows[0].total);
-        const statuses = await pool.query('SELECT id FROM payment_statuses WHERE deleted_at IS NULL AND client_id = $1 AND is_active = true ORDER BY sort_order', [req.user.client_id]);
-        let newStatusId = null;
-        if (paid >= total && total > 0) {
-          const cobrado = statuses.rows.find(s => true); // first is impago, use last
-          newStatusId = statuses.rows[statuses.rows.length - 1]?.id;
-        } else if (paid > 0) {
-          newStatusId = statuses.rows.length > 1 ? statuses.rows[1]?.id : statuses.rows[0]?.id;
+
+      const orderRes = await pool.query("SELECT id, total, client_id FROM orders WHERE id = $1", [order_id]);
+      if (orderRes.rows[0]) {
+        const order = orderRes.rows[0];
+        const paidRes = await pool.query("SELECT COALESCE(SUM(amount), 0) AS total_paid FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL", [order_id]);
+        const paid = Number(paidRes.rows[0].total_paid || 0);
+        const totalOrder = Number(order.total || 0);
+
+        const statusRows = await pool.query(
+          "SELECT id, LOWER(name) as name FROM payment_statuses WHERE client_id = $1 AND deleted_at IS NULL AND is_active = true ORDER BY sort_order, id",
+          [order.client_id]
+        );
+
+        let statusId = null;
+        if (paid <= 0) {
+          statusId = statusRows.rows.find(r => r.name.includes('impago'))?.id || statusRows.rows[0]?.id || null;
+        } else if (paid < totalOrder) {
+          statusId = statusRows.rows.find(r => r.name.includes('parcial'))?.id || statusRows.rows[1]?.id || statusRows.rows[0]?.id || null;
         } else {
-          newStatusId = statuses.rows[0]?.id;
+          statusId = statusRows.rows.find(r => r.name == 'cobrado' || r.name.includes('cobrado'))?.id || statusRows.rows[statusRows.rows.length - 1]?.id || null;
         }
-        if (newStatusId) await pool.query('UPDATE orders SET payment_status_id = $1, updated_at = NOW() WHERE id = $2', [newStatusId, order_id]);
+
+        if (statusId) {
+          await pool.query("UPDATE orders SET payment_status_id = $1, updated_at = NOW() WHERE id = $2", [statusId, order_id]);
+        }
       }
     }
     res.json(rows[0]);
