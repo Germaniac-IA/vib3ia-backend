@@ -2301,6 +2301,16 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// POST /api/cash-sessions/leave - user leaves their joined session
+app.post('/api/cash-sessions/leave', authenticate, async (req, res) => {
+  try {
+    const user_id = req.user?.id;
+    if (!user_id) return res.status(401).json({ error: 'No autorizado' });
+    await pool.query("UPDATE users SET joined_session_id = NULL WHERE id = $1", [user_id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Cash Movements (Cobros)
 app.get('/api/cash-movements', async (req, res) => {
   try {
