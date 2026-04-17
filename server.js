@@ -2462,7 +2462,7 @@ app.post('/api/cash-movements', async (req, res) => {
         session_id = sess.rows[0].id;
       }
     }
-    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_by, created_at) VALUES ($1, 'cash', $2, $3, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null, user_id]);
+    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_by, created_at) VALUES (COALESCE($1, (SELECT id FROM cash_sessions WHERE status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1)), 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null, user_id]);
     if (reason === 'nv_payment' && order_id) {
       await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at, created_by, notes) VALUES ($1, $2, $3, NOW(), $4, $5)", [order_id, financial_account_id, amount, user_id, notes || 'Cobro desde modulo Cobros']);
     }
