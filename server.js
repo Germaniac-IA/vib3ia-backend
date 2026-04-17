@@ -2950,18 +2950,30 @@ app.post('/api/cash-sessions/:id/join', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/cash-sessions/:id/close - close a cash session
+// POST /api/cash-sessions/:id/close - close a cash session (only if no other users joined)
 app.post('/api/cash-sessions/:id/close', async (req, res) => {
   try {
-    const { final_amount, total_cash, total_digital, total_other, notes } = req.body;
-    const { rows } = await pool.query(
-      `UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1,
-       total_cash=$2, total_digital=$3, total_other=$4, notes=$5, updated_at=NOW()
-       WHERE id=$6 AND status='open' AND deleted_at IS NULL RETURNING *`,
-      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, notes || '', req.params.id]
+    const { final_amount = 0, total_cash = 0, total_digital = 0, total_other = 0, notes = '' } = req.body;
+    const diff = Number(final_amount);
+    const status2 = diff === 0 ? 'balanced' : diff > 0 ? 'surplus' : 'deficit';
+    const session_id = req.params.id;
+
+    const others = await pool.query(
+      "SELECT id, name FROM users WHERE joined_session_id = $1 AND deleted_at IS NULL",
+      [session_id]
     );
-    if (!rows[0]) return res.status(404).json({ error: 'Sesion no encontrada o ya cerrada' });
-    res.json(rows[0]);
+    if (others.rows.length > 0) {
+      const names = others.rows.map(r => r.name).join(", ");
+      return res.status(400).json({
+        error: "Otros usuarios todavia tienen la caja abierta: " + names + ". Todos deben cerrarla o salir primero."
+      });
+    }
+
+    await pool.query(
+      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=$8 AND status='open' AND deleted_at IS NULL",
+      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', session_id]
+    );
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
