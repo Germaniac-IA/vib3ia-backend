@@ -503,7 +503,7 @@ app.get('/api/products', authenticate, async (req, res) => {
       LEFT JOIN product_brands pb ON p.brand_id = pb.id
       WHERE p.client_id = $1 AND ${activeFilter} AND p.deleted_at IS NULL
       ORDER BY p.name
-    `);
+    `, [req.user.client_id]);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
