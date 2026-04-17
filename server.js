@@ -2225,7 +2225,7 @@ app.get('/api/cash-sessions/open', authenticate, async (req, res) => {
 app.post('/api/cash-sessions/:id/join', authenticate, async (req, res) => {
   try {
     const user_id = req.user?.id || 1;
-    const session_id = req.params.id;
+    const session_id = parseInt(req.params.id);
     const { rows: sessionRows } = await pool.query(
       "SELECT id, user_id FROM cash_sessions WHERE id = $1 AND status = 'open' AND deleted_at IS NULL",
       [session_id]
@@ -2280,7 +2280,7 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
     const { final_amount = 0, total_cash = 0, total_digital = 0, total_other = 0, notes = '' } = req.body;
     const diff = Number(final_amount);
     const status2 = diff === 0 ? 'balanced' : diff > 0 ? 'surplus' : 'deficit';
-    const session_id = req.params.id;
+    const session_id = parseInt(req.params.id);
 
     const others = await pool.query(
       "SELECT id, name FROM users WHERE joined_session_id = $1 AND deleted_at IS NULL",
@@ -2294,8 +2294,8 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
     }
 
     await pool.query(
-      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=$8 AND status='open' AND deleted_at IS NULL",
-      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', session_id]
+      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=CAST($8 AS INTEGER) AND status='open' AND deleted_at IS NULL",
+      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', parseInt(session_id)]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2982,7 +2982,7 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
     const { final_amount = 0, total_cash = 0, total_digital = 0, total_other = 0, notes = '' } = req.body;
     const diff = Number(final_amount);
     const status2 = diff === 0 ? 'balanced' : diff > 0 ? 'surplus' : 'deficit';
-    const session_id = req.params.id;
+    const session_id = parseInt(req.params.id);
 
     const others = await pool.query(
       "SELECT id, name FROM users WHERE joined_session_id = $1 AND deleted_at IS NULL",
@@ -2996,8 +2996,8 @@ app.post('/api/cash-sessions/:id/close', async (req, res) => {
     }
 
     await pool.query(
-      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=$8 AND status='open' AND deleted_at IS NULL",
-      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', session_id]
+      "UPDATE cash_sessions SET status='closed', closed_at=NOW(), final_amount=$1, total_cash=$2, total_digital=$3, total_other=$4, diff=$5, status2=$6, notes=$7, updated_at=NOW() WHERE id=CAST($8 AS INTEGER) AND status='open' AND deleted_at IS NULL",
+      [final_amount || 0, total_cash || 0, total_digital || 0, total_other || 0, diff, status2, notes || '', parseInt(session_id)]
     );
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
