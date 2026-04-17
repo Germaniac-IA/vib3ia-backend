@@ -1003,7 +1003,7 @@ app.get('/api/orders', authenticate, async (req, res) => {
       ) op ON op.order_id = o.id
       WHERE o.deleted_at IS NULL
       ORDER BY o.created_at DESC
-    `, [req.user.client_id]);
+    `);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1016,7 +1016,7 @@ app.get('/api/orders/unpaid', authenticate, async (req, res) => {
     const { contact_id } = req.query;
     let contactFilter = '';
     let params = [];
-    if (contact_id) { contactFilter = ' AND o.contact_id = $2'; params.push(contact_id); }
+    if (contact_id) { contactFilter = ' AND o.contact_id = $1'; params.push(contact_id); }
     const result = await pool.query(`
       SELECT
         o.id, o.order_number, o.total,
