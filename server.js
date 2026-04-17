@@ -2729,11 +2729,24 @@ app.get('/api/purchase-orders/unpaid', authenticate, async (req, res) => {
         po.order_number,
         po.total,
         prov.name AS provider_name,
-        COALESCE(SUM(op.amount), 0) AS payment_paid,
-        (po.total - COALESCE(SUM(op.amount), 0)) AS payment_pending
+        GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) AS payment_paid,
+        (po.total - GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0))) AS payment_pending
       FROM purchase_orders po
       LEFT JOIN providers prov ON po.provider_id = prov.id
-      LEFT JOIN order_payments op ON op.order_id = po.id AND op.deleted_at IS NULL
+      LEFT JOIN (
+        SELECT order_id, COALESCE(SUM(amount), 0) AS paid_sum
+        FROM order_payments
+        WHERE deleted_at IS NULL
+        GROUP BY order_id
+      ) op ON op.order_id = po.id
+      LEFT JOIN (
+        SELECT purchase_order_id, COALESCE(SUM(amount), 0) AS paid_sum
+        FROM cash_movements
+        WHERE deleted_at IS NULL AND purchase_order_id IS NOT NULL AND type IN ('in', 'out') AND (
+          reason = 'np_payment' OR (reason = 'other_in' AND type = 'in')
+        )
+        GROUP BY purchase_order_id
+      ) cm ON cm.purchase_order_id = po.id
       WHERE po.deleted_at IS NULL
     `;
     const params = [];
@@ -2742,8 +2755,7 @@ app.get('/api/purchase-orders/unpaid', authenticate, async (req, res) => {
       sql += ` AND po.provider_id = $${params.length}`;
     }
     sql += `
-      GROUP BY po.id, po.order_number, po.total, prov.name
-      HAVING (po.total - COALESCE(SUM(op.amount), 0)) > 0
+      AND (po.total - GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0))) > 0
       ORDER BY po.created_at DESC
       LIMIT 100
     `;
