@@ -1918,7 +1918,7 @@ app.delete('/api/orders/:id', authenticate, async (req, res) => {
         [item.quantity, item.product_id]
       );
     }
-    await pool.query('UPDATE orders SET deleted_at = NOW() WHERE id = $1 AND client_id = $2', [req.params.id, req.user.client_id]);
+    await pool.query('UPDATE orders SET deleted_at = NOW() WHERE id = $1', [req.params.id]);
     res.json({ message: 'Venta eliminada' });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
