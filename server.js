@@ -2193,10 +2193,11 @@ app.get('/api/cash-sessions', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/cash-sessions', async (req, res) => {
+app.post('/api/cash-sessions', authenticate, async (req, res) => {
   try {
     const { initial_amount = 0 } = req.body;
     const user_id = req.user?.id || 1;
+    await pool.query("UPDATE users SET joined_session_id = NULL WHERE id = $1", [user_id]);
     const existing = await pool.query("SELECT * FROM cash_sessions WHERE user_id = $1 AND status = 'open' AND session_type = 'cash'", [user_id]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Ya hay una caja abierta' });
     const { rows } = await pool.query("INSERT INTO cash_sessions (user_id, opened_at, status, initial_amount, session_type) VALUES ($1, NOW(), 'open', $2, 'cash') RETURNING *", [user_id, initial_amount]);
@@ -2206,13 +2207,13 @@ app.post('/api/cash-sessions', async (req, res) => {
 
 
 // GET /api/cash-sessions/open - list other users' open sessions
-app.get('/api/cash-sessions/open', async (req, res) => {
+app.get('/api/cash-sessions/open', authenticate, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT cs.id, cs.session_type, cs.opened_at, cs.total_in, cs.total_out,
+      `SELECT cs.id, cs.session_type, cs.opened_at, 0 as total_in, 0 as total_out,
               u.name as user_name, u.id as user_id
        FROM cash_sessions cs
-       LEFT JOIN users u ON cs.created_by = u.id
+       LEFT JOIN users u ON cs.user_id = u.id
        WHERE cs.status = 'open' AND cs.deleted_at IS NULL
        ORDER BY cs.opened_at DESC`
     );
@@ -2223,24 +2224,50 @@ app.get('/api/cash-sessions/open', async (req, res) => {
 // POST /api/cash-sessions/:id/join - join another user's open session
 app.post('/api/cash-sessions/:id/join', async (req, res) => {
   try {
-    // The user just needs to be able to post movements to this session
-    // For now, just return success - the session_id in the JWT will be used
-    const { rows } = await pool.query(
-      "SELECT id FROM cash_sessions WHERE id = $1 AND status = 'open' AND deleted_at IS NULL",
-      [req.params.id]
+    const user_id = req.user?.id || 1;
+    const session_id = req.params.id;
+    const { rows: sessionRows } = await pool.query(
+      "SELECT id, user_id FROM cash_sessions WHERE id = $1 AND status = 'open' AND deleted_at IS NULL",
+      [session_id]
     );
-    if (!rows[0]) return res.status(404).json({ error: 'Sesión no encontrada o cerrada' });
-    res.json({ success: true, session_id: req.params.id });
+    if (!sessionRows[0]) return res.status(404).json({ error: 'Sesión no encontrada o cerrada' });
+    if (sessionRows[0].user_id === user_id) return res.status(400).json({ error: 'Ya tenés tu propia caja abierta' });
+    // Point user's joined_session_id to this shared session
+    await pool.query(
+      "UPDATE users SET joined_session_id = $1 WHERE id = $2",
+      [session_id, user_id]
+    );
+    res.json({ success: true, session_id: parseInt(session_id) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get('/api/cash-sessions/current', async (req, res) => {
+app.get('/api/cash-sessions/current', authenticate, async (req, res) => {
   try {
     const user_id = req.user?.id || 1;
-    const { rows } = await pool.query("SELECT cs.*, u.name as user_name FROM cash_sessions cs LEFT JOIN users u ON cs.user_id = u.id WHERE cs.user_id = $1 AND cs.status = 'open' AND cs.session_type = 'cash' ORDER BY cs.opened_at DESC LIMIT 1", [user_id]);
-    if (rows.length === 0) return res.json(null);
-    const sess = rows[0];
-    const mv = await pool.query("SELECT cm.*, fa.name as account_name, c.name as contact_name, o.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id LEFT JOIN contacts c ON cm.contact_id = c.id LEFT JOIN orders o ON cm.order_id = o.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = $2 ORDER BY cm.created_at DESC", [sess.id, 'cash']);
+    // If user joined another session, work there
+    const { rows: userRows } = await pool.query(
+      "SELECT joined_session_id FROM users WHERE id = $1",
+      [user_id]
+    );
+    let sess;
+    if (userRows[0]?.joined_session_id) {
+      const { rows } = await pool.query(
+        "SELECT cs.*, u.name as user_name FROM cash_sessions cs LEFT JOIN users u ON cs.user_id = u.id WHERE cs.id = $1 AND cs.status = 'open' ORDER BY cs.opened_at DESC LIMIT 1",
+        [userRows[0].joined_session_id]
+      );
+      sess = rows[0] || null;
+    } else {
+      const { rows } = await pool.query(
+        "SELECT cs.*, u.name as user_name FROM cash_sessions cs LEFT JOIN users u ON cs.user_id = u.id WHERE cs.user_id = $1 AND cs.status = 'open' AND cs.session_type = 'cash' ORDER BY cs.opened_at DESC LIMIT 1",
+        [user_id]
+      );
+      sess = rows[0] || null;
+    }
+    if (!sess) return res.json(null);
+    const mv = await pool.query(
+      "SELECT cm.*, fa.name as account_name, c.name as contact_name, o.order_number, u.name as created_by_name FROM cash_movements cm LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id LEFT JOIN contacts c ON cm.contact_id = c.id LEFT JOIN orders o ON cm.order_id = o.id LEFT JOIN users u ON cm.created_by = u.id WHERE cm.session_id = $1 AND cm.session_type = 'cash' ORDER BY cm.created_at DESC",
+      [sess.id]
+    );
     sess.movements = mv.rows;
     sess.total_in = mv.rows.filter(m => m.type === 'in').reduce((sum, m) => sum + Number(m.amount), 0);
     sess.total_out = mv.rows.filter(m => m.type === 'out').reduce((sum, m) => sum + Number(m.amount), 0);
@@ -2287,11 +2314,27 @@ app.post('/api/cash-movements', async (req, res) => {
     const { financial_account_id, type = 'in', reason = 'other_in', order_id, contact_id, supplier_id, purchase_order_id, amount, notes } = req.body;
     if (!financial_account_id || !amount) return res.status(400).json({ error: 'Faltan campos requeridos' });
     const user_id = req.user?.id || 1;
-    const sess = await pool.query("SELECT * FROM cash_sessions WHERE user_id = $1 AND status = 'open' AND session_type = 'cash' ORDER BY opened_at DESC LIMIT 1", [user_id]);
-    let session_id = sess.rows[0]?.id;
-    if (!session_id) {
-      const ns = await pool.query("INSERT INTO cash_sessions (user_id, opened_at, status, initial_amount, session_type) VALUES ($1, NOW(), 'open', 0, 'cash') RETURNING id", [user_id]);
-      session_id = ns.rows[0].id;
+    let session_id;
+    const { rows: userRows } = await pool.query(
+      "SELECT joined_session_id FROM users WHERE id = $1",
+      [user_id]
+    );
+    if (userRows[0]?.joined_session_id) {
+      session_id = userRows[0].joined_session_id;
+    } else {
+      const sess = await pool.query(
+        "SELECT id FROM cash_sessions WHERE user_id = $1 AND status = 'open' AND session_type = 'cash' ORDER BY opened_at DESC LIMIT 1",
+        [user_id]
+      );
+      if (!sess.rows[0]) {
+        const ns = await pool.query(
+          "INSERT INTO cash_sessions (user_id, opened_at, status, initial_amount, session_type) VALUES ($1, NOW(), 'open', 0, 'cash') RETURNING id",
+          [user_id]
+        );
+        session_id = ns.rows[0].id;
+      } else {
+        session_id = sess.rows[0].id;
+      }
     }
     const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_by, created_at) VALUES ($1, 'cash', $2, $3, $4, $5, $6, $7, $8, $9, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null, user_id]);
     if (reason === 'nv_payment' && order_id) {
@@ -2566,6 +2609,7 @@ app.post('/api/payment-sessions', async (req, res) => {
   try {
     const { initial_amount = 0 } = req.body;
     const user_id = req.user?.id || 1;
+    await pool.query("UPDATE users SET joined_session_id = NULL WHERE id = $1", [user_id]);
     const existing = await pool.query("SELECT * FROM cash_sessions WHERE user_id = $1 AND status = 'open' AND session_type = 'pagos'", [user_id]);
     if (existing.rows.length > 0) return res.status(400).json({ error: 'Ya hay una sesion de pagos abierta' });
     const { rows } = await pool.query("INSERT INTO cash_sessions (user_id, opened_at, status, initial_amount, session_type) VALUES ($1, NOW(), 'open', $2, 'pagos') RETURNING *", [user_id, initial_amount]);
@@ -2833,7 +2877,7 @@ app.get('/api/deliveries/stats', async (req, res) => {
 
 // ===================== CASH SESSIONS =====================
 // POST /api/cash-sessions - open a new cash session
-app.post('/api/cash-sessions', async (req, res) => {
+app.post('/api/cash-sessions', authenticate, async (req, res) => {
   try {
     const clientId = req.user?.client_id || 1;
     const userId = req.user?.id;
@@ -2856,7 +2900,7 @@ app.post('/api/cash-sessions', async (req, res) => {
 });
 
 // GET /api/cash-sessions/current - get current open session for this client
-app.get('/api/cash-sessions/current', async (req, res) => {
+app.get('/api/cash-sessions/current', authenticate, async (req, res) => {
   try {
     const clientId = req.user?.client_id || 1;
     const { rows } = await pool.query(
@@ -2864,7 +2908,7 @@ app.get('/api/cash-sessions/current', async (req, res) => {
               (SELECT COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_in,
               (SELECT COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_out
        FROM cash_sessions cs
-       LEFT JOIN users u ON cs.created_by = u.id
+       LEFT JOIN users u ON cs.user_id = u.id
        WHERE cs.client_id=$1 AND cs.status='open' AND cs.deleted_at IS NULL
        ORDER BY cs.opened_at DESC LIMIT 1`,
       [clientId]
@@ -2876,7 +2920,7 @@ app.get('/api/cash-sessions/current', async (req, res) => {
 });
 
 // GET /api/cash-sessions/open - list other users' open sessions
-app.get('/api/cash-sessions/open', async (req, res) => {
+app.get('/api/cash-sessions/open', authenticate, async (req, res) => {
   try {
     const clientId = req.user?.client_id || 1;
     const { rows } = await pool.query(
@@ -2885,7 +2929,7 @@ app.get('/api/cash-sessions/open', async (req, res) => {
               (SELECT COALESCE(SUM(CASE WHEN type='in' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_in,
               (SELECT COALESCE(SUM(CASE WHEN type='out' THEN amount ELSE 0 END),0) FROM cash_movements WHERE session_id=cs.id AND deleted_at IS NULL) as total_out
        FROM cash_sessions cs
-       LEFT JOIN users u ON cs.created_by = u.id
+       LEFT JOIN users u ON cs.user_id = u.id
        WHERE cs.client_id=$1 AND cs.status='open' AND cs.deleted_at IS NULL
        ORDER BY cs.opened_at DESC`,
       [clientId]
