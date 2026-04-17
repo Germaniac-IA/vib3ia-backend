@@ -1010,6 +1010,37 @@ app.get('/api/orders', authenticate, async (req, res) => {
   }
 });
 
+// GET /api/orders/unpaid - list orders with pending payments (for Cobros NV selector)
+app.get('/api/orders/unpaid', authenticate, async (req, res) => {
+  try {
+    const { contact_id } = req.query;
+    let contactFilter = '';
+    let params = [req.user.client_id];
+    if (contact_id) { contactFilter = ' AND o.contact_id = $2'; params.push(contact_id); }
+    const result = await pool.query(`
+      SELECT
+        o.id, o.order_number, o.total,
+        o.contact_id,
+        c.name as contact_name, c.phone as contact_phone,
+        COALESCE(op.paid_sum, 0) as payment_paid,
+        o.total - COALESCE(op.paid_sum, 0) as payment_pending
+      FROM orders o
+      LEFT JOIN contacts c ON o.contact_id = c.id
+      LEFT JOIN (
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
+        FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+      ) op ON op.order_id = o.id
+      WHERE o.client_id = $1 AND o.deleted_at IS NULL
+        AND (o.total - COALESCE(op.paid_sum, 0)) > 0
+        ${contactFilter}
+      ORDER BY o.created_at DESC
+    `, params);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/orders/:id', authenticate, async (req, res) => {
   try {
     const orderResult = await pool.query(`
