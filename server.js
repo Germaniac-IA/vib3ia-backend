@@ -1239,15 +1239,9 @@ app.put('/api/orders/:id', authenticate, async (req, res) => {
       values
     );
     const updated = result.rows[0];
-    // Sync order status to delivery (match by name, not by hardcoded ID)
+    // Sync order status to delivery (by order_status_id)
     if (order_status_id !== undefined && updated?.delivery_id) {
-      const statusRes = await pool.query('SELECT name FROM order_statuses WHERE id = $1 AND deleted_at IS NULL', [order_status_id]);
-      const statusName = statusRes.rows[0]?.name;
-      const deliveryStatusMap = { 'Pendiente': 'Pendiente', 'En Proceso': 'En Camino', 'En Camino': 'En Camino', 'Entregado': 'Entregado', 'Cancelado': 'Cancelado' };
-      const newDeliveryStatus = deliveryStatusMap[statusName];
-      if (newDeliveryStatus) {
-        await pool.query('UPDATE deliveries SET status = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL', [newDeliveryStatus, updated.delivery_id]);
-      }
+      await pool.query('UPDATE deliveries SET order_status_id = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL', [order_status_id, updated.delivery_id]);
     }
     res.json(updated || null);
   } catch (error) { res.status(500).json({ error: error.message }); }
@@ -2851,17 +2845,17 @@ app.get('/api/deliveries', async (req, res) => {
     if (period === 'today') dateFilter = " AND DATE(d.created_at) = CURRENT_DATE";
     else if (period === 'week') dateFilter = " AND d.created_at >= CURRENT_DATE - INTERVAL '7 days'";
     else if (period === 'month') dateFilter = " AND d.created_at >= CURRENT_DATE - INTERVAL '30 days'";
-    let statusFilter = status ? ` AND d.status = '${status}'` : '';
+    let statusFilter = status ? ` AND d.order_status_id = ${status}` : '';
     const { rows } = await pool.query(
       `SELECT d.id, d.order_id, d.address, d.scheduled_date, d.delivered_date,
-              d.status, d.notes, d.created_at, d.delivery_fee,
+              d.order_status_id, d.notes, d.created_at, d.delivery_fee,
               o.order_number, o.total as order_total, o.order_status_id,
               c.name as contact_name, c.phone as contact_phone, c.address as contact_addr,
-              ds.name as status_name, ds.color as status_color
+              os.name as status_name, os.color as status_color
        FROM deliveries d
        JOIN orders o ON d.order_id = o.id
        LEFT JOIN contacts c ON d.contact_id = c.id
-       LEFT JOIN delivery_statuses ds ON ds.name = d.status
+       LEFT JOIN order_statuses os ON d.order_status_id = os.id
        WHERE d.client_id = $1 AND d.deleted_at IS NULL${dateFilter}${statusFilter}
        ORDER BY d.created_at DESC`,
       [clientId]
@@ -2879,8 +2873,8 @@ app.post('/api/deliveries', async (req, res) => {
     const orderRow = await pool.query('SELECT contact_id FROM orders WHERE id = $1', [order_id]);
     if (!orderRow.rows[0]) return res.status(404).json({ error: 'Pedido no encontrado' });
     const { rows } = await pool.query(
-      `INSERT INTO deliveries (client_id, order_id, contact_id, address, scheduled_date, notes, delivery_fee, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'Pendiente') RETURNING *`,
+      `INSERT INTO deliveries (client_id, order_id, contact_id, address, scheduled_date, notes, delivery_fee, order_status_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 1) RETURNING *`,
       [clientId, order_id, orderRow.rows[0].contact_id, address || '', scheduled_date || null, notes || '', delivery_fee || 0]
     );
     await pool.query('UPDATE orders SET delivery_id = $1 WHERE id = $2', [rows[0].id, order_id]);
@@ -2894,10 +2888,10 @@ app.get('/api/deliveries/stats', async (req, res) => {
     const clientId = req.user?.client_id || 1;
     const { rows } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'Pendiente') as pending_count,
-         COUNT(*) FILTER (WHERE status = 'En Camino') as in_transit_count,
-         COUNT(*) FILTER (WHERE status = 'Entregado') as delivered_count,
-         COUNT(*) FILTER (WHERE status = 'Cancelado') as cancelled_count,
+         COUNT(*) FILTER (WHERE order_status_id = 1) as pending_count,
+         COUNT(*) FILTER (WHERE order_status_id = 2) as in_transit_count,
+         COUNT(*) FILTER (WHERE order_status_id = 3) as delivered_count,
+         COUNT(*) FILTER (WHERE order_status_id = 4) as cancelled_count,
          COUNT(*) as total_count
        FROM deliveries WHERE client_id = $1 AND deleted_at IS NULL`,
       [clientId]
@@ -2924,23 +2918,21 @@ app.get('/api/deliveries/:id', async (req, res) => {
 app.put('/api/deliveries/:id', async (req, res) => {
   const client = await pool.connect();
   try {
-    const { address, scheduled_date, status, notes, delivery_fee } = req.body;
+    const { address, scheduled_date, order_status_id, notes, delivery_fee } = req.body;
     await client.query('BEGIN');
     // Update delivery
     const { rows } = await client.query(
       `UPDATE deliveries SET address = COALESCE($1, address), scheduled_date = COALESCE($2, scheduled_date),
-       status = COALESCE($3, status), notes = COALESCE($4, notes), delivery_fee = COALESCE($5, delivery_fee), updated_at = NOW()
+       order_status_id = COALESCE($3, order_status_id), notes = COALESCE($4, notes), delivery_fee = COALESCE($5, delivery_fee), updated_at = NOW()
        WHERE id = $6 AND deleted_at IS NULL RETURNING *`,
-      [address, scheduled_date, status, notes, delivery_fee, req.params.id]
+      [address, scheduled_date, order_status_id, notes, delivery_fee, req.params.id]
     );
     if (!rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'No encontrada' }); }
-    // Sync delivery status to order status (map delivery status to order_status_id)
-    const deliveryStatus = rows[0].status;
-    const statusMap = { 'Pendiente': 1, 'En Camino': 2, 'Entregado': 3, 'Cancelado': 4 };
-    if (statusMap[deliveryStatus]) {
+    // Sync delivery order_status_id to order
+    if (rows[0].order_status_id) {
       await client.query(
         `UPDATE orders SET order_status_id = $1 WHERE id = $2`,
-        [statusMap[deliveryStatus], rows[0].order_id]
+        [rows[0].order_status_id, rows[0].order_id]
       );
     }
     await client.query('COMMIT');
@@ -2959,7 +2951,7 @@ app.post('/api/deliveries/:id/confirm', async (req, res) => {
   try {
     await client.query('BEGIN');
     const { rows } = await client.query(
-      `UPDATE deliveries SET status = 'Entregado', delivered_date = CURRENT_DATE, updated_at = NOW()
+      `UPDATE deliveries SET order_status_id = 3, delivered_date = CURRENT_DATE, updated_at = NOW()
        WHERE id = $1 AND deleted_at IS NULL RETURNING *`,
       [req.params.id]
     );
@@ -2989,7 +2981,7 @@ app.post('/api/deliveries/:id/cancel', async (req, res) => {
       await client.query('UPDATE products SET stock_quantity = stock_quantity + $1 WHERE id = $2', [item.quantity, item.product_id]);
     }
     // Cancel delivery
-    await client.query("UPDATE deliveries SET status = 'Cancelado', updated_at = NOW() WHERE id = $1", [req.params.id]);
+    await client.query("UPDATE deliveries SET order_status_id = 4, updated_at = NOW() WHERE id = $1", [req.params.id]);
     await client.query("UPDATE orders SET order_status_id = 4 WHERE id = $1", [orderId]);
     await client.query('COMMIT');
     res.json({ success: true, order_id: orderId, items_restored: items.rows.length });
@@ -3007,10 +2999,10 @@ app.get('/api/deliveries/stats', async (req, res) => {
     const clientId = req.user?.client_id || 1;
     const { rows } = await pool.query(
       `SELECT
-         COUNT(*) FILTER (WHERE status = 'Pendiente') as pending_count,
-         COUNT(*) FILTER (WHERE status = 'En Camino') as in_transit_count,
-         COUNT(*) FILTER (WHERE status = 'Entregado') as delivered_count,
-         COUNT(*) FILTER (WHERE status = 'Cancelado') as cancelled_count,
+         COUNT(*) FILTER (WHERE order_status_id = 1) as pending_count,
+         COUNT(*) FILTER (WHERE order_status_id = 2) as in_transit_count,
+         COUNT(*) FILTER (WHERE order_status_id = 3) as delivered_count,
+         COUNT(*) FILTER (WHERE order_status_id = 4) as cancelled_count,
          COUNT(*) as total_count
        FROM deliveries WHERE client_id = $1 AND deleted_at IS NULL`,
       [clientId]
