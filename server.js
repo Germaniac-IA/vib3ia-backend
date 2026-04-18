@@ -1004,6 +1004,16 @@ app.get('/api/orders', authenticate, async (req, res) => {
       WHERE o.deleted_at IS NULL
       ORDER BY o.created_at DESC
     `);
+    for (const o of result.rows) {
+      const items = await pool.query(`
+        SELECT oi.*, p.name as product_name
+        FROM order_items oi
+        LEFT JOIN products p ON oi.product_id = p.id
+        WHERE oi.order_id = $1 AND oi.deleted_at IS NULL
+        ORDER BY oi.id
+      `, [o.id]);
+      o.items = items.rows;
+    }
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -2611,12 +2621,12 @@ app.post('/api/purchase-orders', async (req, res) => {
         );
         await pool.query("UPDATE cash_sessions SET total_in = total_in + $1 WHERE id = $2", [payment_amount, sessRows[0].id]);
       }
-      // Actualizar payment_status a Cobrado si el monto cubre el total
+      // Actualizar payment_status a Pagado si el monto cubre el total
       if (Number(payment_amount) >= total) {
-        const { rows: cobrRows } = await pool.query("SELECT id FROM payment_statuses WHERE name = 'Cobrado' LIMIT 1");
+        const { rows: cobrRows } = await pool.query("SELECT id FROM payment_statuses WHERE LOWER(name) = 'pagado' LIMIT 1");
         if (cobrRows[0]) await pool.query("UPDATE purchase_orders SET payment_status_id = $1 WHERE id = $2", [cobrRows[0].id, order.id]);
       } else {
-        const { rows: parcRows } = await pool.query("SELECT id FROM payment_statuses WHERE name = 'Cobrado Parcial' LIMIT 1");
+        const { rows: parcRows } = await pool.query("SELECT id FROM payment_statuses WHERE LOWER(name) = 'pagado parcial' LIMIT 1");
         if (parcRows[0]) await pool.query("UPDATE purchase_orders SET payment_status_id = $1 WHERE id = $2", [parcRows[0].id, order.id]);
       }
     }
@@ -2903,9 +2913,9 @@ app.post('/api/payment-movements', async (req, res) => {
         if (paid <= 0) {
           statusId = statusRows.rows.find(r => r.name.includes('impago'))?.id || statusRows.rows[0]?.id || null;
         } else if (paid < totalPO) {
-          statusId = statusRows.rows.find(r => r.name.includes('parcial'))?.id || statusRows.rows[1]?.id || statusRows.rows[0]?.id || null;
+          statusId = statusRows.rows.find(r => r.name.includes('pagado parcial'))?.id || statusRows.rows.find(r => r.name.includes('parcial'))?.id || statusRows.rows[1]?.id || statusRows.rows[0]?.id || null;
         } else {
-          statusId = statusRows.rows.find(r => r.name == 'cobrado')?.id || statusRows.rows.find(r => r.name.includes('cobrado') && !r.name.includes('parcial'))?.id || statusRows.rows[statusRows.rows.length - 1]?.id || null;
+          statusId = statusRows.rows.find(r => r.name == 'pagado')?.id || statusRows.rows.find(r => r.name.includes('pagado') && !r.name.includes('parcial'))?.id || statusRows.rows[statusRows.rows.length - 1]?.id || null;
         }
 
         if (statusId) {
