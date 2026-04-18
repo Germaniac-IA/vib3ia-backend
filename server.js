@@ -2459,14 +2459,9 @@ app.post('/api/cash-movements', authenticate, async (req, res) => {
         [user_id]
       );
       if (!sess.rows[0]) {
-        const ns = await pool.query(
-          "INSERT INTO cash_sessions (user_id, opened_at, status, initial_amount, session_type) VALUES ($1, NOW(), 'open', 0, 'cash') RETURNING id",
-          [user_id]
-        );
-        session_id = ns.rows[0].id;
-      } else {
-        session_id = sess.rows[0].id;
+        return res.status(400).json({ error: 'Necesitás abrir una caja antes de registrar un cobro' });
       }
+      session_id = sess.rows[0].id;
     }
     const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES (COALESCE($1, (SELECT id FROM cash_sessions WHERE status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1)), 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null]);
     if (reason === 'nv_payment' && order_id) {
@@ -2611,16 +2606,21 @@ app.post('/api/purchase-orders', async (req, res) => {
     }
     // Si pagaron en el acto, registrar movimiento de pago entrante
     if (payment_method_id && Number(payment_amount) > 0) {
-      const { rows: sessRows } = await pool.query(
-        "SELECT id FROM cash_sessions WHERE session_type='pagos' AND status='open' AND deleted_at IS NULL ORDER BY id DESC LIMIT 1"
-      );
-      if (sessRows.length > 0) {
-        await pool.query(
-          "INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, amount, purchase_order_id) VALUES ($1,'pagos',$2,'in','other_in',$3,$4)",
-          [sessRows[0].id, payment_method_id, payment_amount, order.id]
-        );
-        await pool.query("UPDATE cash_sessions SET total_in = total_in + $1 WHERE id = $2", [payment_amount, sessRows[0].id]);
+      const user_id = req.user?.id || 1;
+      const { rows: userRows } = await pool.query("SELECT joined_session_id FROM users WHERE id = $1", [user_id]);
+      let session_id = userRows[0]?.joined_session_id || null;
+      if (!session_id) {
+        const { rows: sessRows } = await pool.query("SELECT id FROM cash_sessions WHERE user_id = $1 AND session_type='cash' AND status='open' AND deleted_at IS NULL ORDER BY id DESC LIMIT 1", [user_id]);
+        session_id = sessRows[0]?.id || null;
       }
+      if (!session_id) {
+        return res.status(400).json({ error: 'Necesitás abrir una caja para marcar la compra como pagada en el momento' });
+      }
+      await pool.query(
+        "INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, amount, purchase_order_id) VALUES ($1,'cash',$2,'out','np_payment',$3,$4)",
+        [session_id, payment_method_id, payment_amount, order.id]
+      );
+      await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [order.id, payment_method_id, payment_amount]);
       // Actualizar payment_status a Pagado si el monto cubre el total
       if (Number(payment_amount) >= total) {
         const { rows: cobrRows } = await pool.query("SELECT id FROM payment_statuses WHERE LOWER(name) = 'pagado' LIMIT 1");
@@ -2887,13 +2887,16 @@ app.post('/api/payment-movements', async (req, res) => {
     const { financial_account_id, type = 'out', reason = 'other_out', order_id, contact_id, supplier_id, purchase_order_id, amount, notes } = req.body;
     if (!financial_account_id || !amount) return res.status(400).json({ error: 'Faltan campos requeridos' });
     const user_id = req.user?.id || 1;
-    const sess = await pool.query("SELECT * FROM cash_sessions WHERE user_id = $1 AND status = 'open' AND session_type = 'pagos' ORDER BY opened_at DESC LIMIT 1", [user_id]);
-    let session_id = sess.rows[0]?.id;
+    const { rows: userRows } = await pool.query("SELECT joined_session_id FROM users WHERE id = $1", [user_id]);
+    let session_id = userRows[0]?.joined_session_id || null;
     if (!session_id) {
-      const ns = await pool.query("INSERT INTO cash_sessions (user_id, opened_at, status, initial_amount, session_type) VALUES ($1, NOW(), 'open', 0, 'pagos') RETURNING id", [user_id]);
-      session_id = ns.rows[0].id;
+      const sess = await pool.query("SELECT * FROM cash_sessions WHERE user_id = $1 AND status = 'open' AND session_type = 'cash' ORDER BY opened_at DESC LIMIT 1", [user_id]);
+      session_id = sess.rows[0]?.id;
     }
-    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, contact_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES ($1, 'pagos', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null]);
+    if (!session_id) {
+      return res.status(400).json({ error: 'Necesitás abrir una caja antes de registrar un pago' });
+    }
+    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, contact_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES ($1, 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null]);
     if (reason === 'np_payment' && purchase_order_id) {
       await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [purchase_order_id, financial_account_id, amount]);
 
