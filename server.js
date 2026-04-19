@@ -2612,13 +2612,15 @@ app.post('/api/cash-movements', authenticate, async (req, res) => {
       session_id = sess.rows[0].id;
     }
     const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES (COALESCE($1, (SELECT id FROM cash_sessions WHERE status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1)), 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null]);
-    if (reason === 'nv_payment' && order_id) {
-      await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [order_id, financial_account_id, amount]);
+    if (['nv_payment', 'sale'].includes(reason) && order_id) {
+      if (reason === 'nv_payment') {
+        await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [order_id, financial_account_id, amount]);
+      }
 
       const orderRes = await pool.query("SELECT id, total, client_id FROM orders WHERE id = $1", [order_id]);
       if (orderRes.rows[0]) {
         const order = orderRes.rows[0];
-        const paidRes = await pool.query("SELECT COALESCE(SUM(amount), 0) AS total_paid FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL", [order_id]);
+        const paidRes = await pool.query("SELECT COALESCE(SUM(amount), 0) AS total_paid FROM (SELECT COALESCE(SUM(amount), 0) as amount FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL UNION ALL SELECT COALESCE(SUM(amount), 0) as amount FROM cash_movements WHERE order_id = $1 AND deleted_at IS NULL) as combined", [order_id]);
         const paid = Number(paidRes.rows[0].total_paid || 0);
         const totalOrder = Number(order.total || 0);
 
