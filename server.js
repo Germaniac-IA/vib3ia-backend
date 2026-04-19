@@ -1279,10 +1279,10 @@ app.post('/api/orders/:id/payments', authenticate, async (req, res) => {
     const statuses = await client.query('SELECT id, name FROM payment_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order', [req.user.client_id]);
     let newStatusId = statuses.rows[0]?.id;
     if (paid >= total && total > 0) {
-      const cobrado = statuses.rows.find(s => s.name === 'Cobrado');
+      const cobrado = statuses.rows.find(s => s.name === 'Pagado');
       newStatusId = cobrado?.id || statuses.rows[statuses.rows.length - 1]?.id;
     } else if (paid > 0) {
-      const parcial = statuses.rows.find(s => s.name === 'Cobrado Parcial');
+      const parcial = statuses.rows.find(s => s.name === 'Pagado parcial');
       newStatusId = parcial?.id || statuses.rows[1]?.id;
     }
     if (newStatusId) await client.query('UPDATE orders SET payment_status_id = $1, updated_at = NOW() WHERE id = $2', [newStatusId, orderId]);
@@ -1313,10 +1313,10 @@ app.delete('/api/orders/:id/payments/:paymentId', authenticate, async (req, res)
     const statuses = await client.query('SELECT id, name FROM payment_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order', [req.user.client_id]);
     let newStatusId = statuses.rows[0]?.id;
     if (paid >= total && total > 0) {
-      const cobrado = statuses.rows.find(s => s.name === 'Cobrado');
+      const cobrado = statuses.rows.find(s => s.name === 'Pagado');
       newStatusId = cobrado?.id || statuses.rows[statuses.rows.length - 1]?.id;
     } else if (paid > 0) {
-      const parcial = statuses.rows.find(s => s.name === 'Cobrado Parcial');
+      const parcial = statuses.rows.find(s => s.name === 'Pagado parcial');
       newStatusId = parcial?.id || statuses.rows[1]?.id;
     }
     if (newStatusId) await client.query('UPDATE orders SET payment_status_id = $1, updated_at = NOW() WHERE id = $2', [newStatusId, req.params.id]);
@@ -2365,7 +2365,7 @@ app.get('/api/advances', authenticate, async (req, res) => {
       FROM advances a
       LEFT JOIN contacts c ON a.entity_type = 'client' AND a.entity_id = c.id
       LEFT JOIN providers p ON a.entity_type = 'provider' AND a.entity_id = p.id
-      WHERE a.deleted_at IS NULL AND a.remaining > 0
+      WHERE a.deleted_at IS NULL
     `;
     const params = [];
     if (entity_type) { params.push(entity_type); query += ` AND a.entity_type = $${params.length}`; }
@@ -2470,10 +2470,10 @@ app.post('/api/advances/:id/use', authenticate, async (req, res) => {
           const statuses = await client.query('SELECT id, name FROM payment_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order', [clientId]);
           let newStatusId = statuses.rows[0]?.id;
           if (paid >= total && total > 0) {
-            const cobrado = statuses.rows.find(s => s.name === 'Cobrado');
+            const cobrado = statuses.rows.find(s => s.name === 'Pagado');
             newStatusId = cobrado?.id || statuses.rows[statuses.rows.length - 1]?.id;
           } else if (paid > 0) {
-            const parcial = statuses.rows.find(s => s.name === 'Cobrado Parcial');
+            const parcial = statuses.rows.find(s => s.name === 'Pagado parcial');
             newStatusId = parcial?.id || statuses.rows[0]?.id;
           }
           await client.query('UPDATE orders SET payment_status_id = $1, updated_at = NOW() WHERE id = $2', [newStatusId, order_id]);
