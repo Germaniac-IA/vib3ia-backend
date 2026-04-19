@@ -2661,7 +2661,14 @@ app.post('/api/cash-movements', authenticate, async (req, res) => {
       }
       session_id = sess.rows[0].id;
     }
-    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES (COALESCE($1, (SELECT id FROM cash_sessions WHERE status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1)), 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null]);
+    // Get client_id: from order if order_id exists, otherwise from user
+    let cash_client_id = req.user?.client_id;
+    if (order_id) {
+      const orderClient = await pool.query("SELECT client_id FROM orders WHERE id = $1", [order_id]);
+      if (orderClient.rows[0]?.client_id) cash_client_id = orderClient.rows[0].client_id;
+    }
+
+    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES (COALESCE($1, (SELECT id FROM cash_sessions WHERE status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1)), 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, cash_client_id, supplier_id || null, purchase_order_id || null, amount, notes || null]);
     if (['nv_payment', 'sale'].includes(reason) && order_id) {
       if (reason === 'nv_payment') {
         await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [order_id, financial_account_id, amount]);
