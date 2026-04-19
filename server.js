@@ -2350,69 +2350,159 @@ app.post('/api/cash-sessions/leave', authenticate, async (req, res) => {
 });
 
 
-// ===================== CLIENT ADVANCES =====================
-// GET /api/client-advances - list advances for a client
-app.get('/api/client-advances', authenticate, async (req, res) => {
+// ===================== ADVANCES =====================
+// GET /api/advances - list advances for a client or provider
+app.get('/api/advances', authenticate, async (req, res) => {
   try {
-    const { client_id } = req.query;
-    let query = "SELECT ca.*, c.name as client_name FROM client_advances ca LEFT JOIN contacts c ON ca.client_id = c.id WHERE ca.deleted_at IS NULL AND ca.remaining > 0";
-    let params = [];
-    if (client_id) { query += " AND ca.client_id = $1"; params.push(client_id); }
-    query += " ORDER BY ca.created_at DESC";
+    const { entity_type, entity_id } = req.query;
+    let query = `
+      SELECT a.*,
+        CASE
+          WHEN a.entity_type = 'client' THEN c.name
+          WHEN a.entity_type = 'provider' THEN p.name
+          ELSE NULL
+        END as entity_name
+      FROM advances a
+      LEFT JOIN contacts c ON a.entity_type = 'client' AND a.entity_id = c.id
+      LEFT JOIN providers p ON a.entity_type = 'provider' AND a.entity_id = p.id
+      WHERE a.deleted_at IS NULL AND a.remaining > 0
+    `;
+    const params = [];
+    if (entity_type) { params.push(entity_type); query += ` AND a.entity_type = $${params.length}`; }
+    if (entity_id) { params.push(entity_id); query += ` AND a.entity_id = $${params.length}`; }
+    query += ' ORDER BY a.created_at DESC';
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /api/client-advances/by-client/:clientId - all advances for a client (including used up)
-app.get('/api/client-advances/by-client/:clientId', authenticate, async (req, res) => {
+// GET /api/advances/by-entity/:entityType/:entityId - all advances for an entity
+app.get('/api/advances/by-entity/:entityType/:entityId', authenticate, async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT ca.*, c.name as client_name FROM client_advances ca LEFT JOIN contacts c ON ca.client_id = c.id WHERE ca.client_id = $1 AND ca.deleted_at IS NULL ORDER BY ca.created_at DESC",
-      [parseInt(req.params.clientId)]
+      `SELECT a.*,
+        CASE
+          WHEN a.entity_type = 'client' THEN c.name
+          WHEN a.entity_type = 'provider' THEN p.name
+          ELSE NULL
+        END as entity_name
+      FROM advances a
+      LEFT JOIN contacts c ON a.entity_type = 'client' AND a.entity_id = c.id
+      LEFT JOIN providers p ON a.entity_type = 'provider' AND a.entity_id = p.id
+      WHERE a.entity_type = $1 AND a.entity_id = $2 AND a.deleted_at IS NULL
+      ORDER BY a.created_at DESC`,
+      [req.params.entityType, parseInt(req.params.entityId)]
     );
     res.json(result.rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/client-advances - create a new advance
-app.post('/api/client-advances', authenticate, async (req, res) => {
+// POST /api/advances - create a new advance
+app.post('/api/advances', authenticate, async (req, res) => {
   try {
-    const { client_id, amount, notes = '' } = req.body;
-    if (!client_id || !amount) return res.status(400).json({ error: "Faltan campos requeridos" });
+    const { entity_type, entity_id, amount, notes = '' } = req.body;
+    if (!entity_type || !entity_id || !amount) return res.status(400).json({ error: 'Faltan campos requeridos' });
     const remaining = Number(amount);
     const result = await pool.query(
-      "INSERT INTO client_advances (client_id, amount, used_amount, remaining, notes, created_by) VALUES ($1, $2, 0, $2, $3, $4) RETURNING *",
-      [client_id, remaining, notes, req.user?.id || 1]
+      'INSERT INTO advances (entity_type, entity_id, amount, used_amount, remaining, notes, created_by) VALUES ($1, $2, $3, 0, $3, $4, $5) RETURNING *',
+      [entity_type, entity_id, remaining, notes, req.user?.id || 1]
     );
     res.json(result.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// POST /api/client-advances/:id/use - use (consume) part of an advance
-app.post('/api/client-advances/:id/use', authenticate, async (req, res) => {
+// POST /api/advances/:id/use - consume part of an advance
+app.post('/api/advances/:id/use', authenticate, async (req, res) => {
   try {
     const { amount } = req.body;
     const id = parseInt(req.params.id);
-    const advance = await pool.query("SELECT * FROM client_advances WHERE id = $1 AND deleted_at IS NULL", [id]);
-    if (!advance.rows.length) return res.status(404).json({ error: "Anticipo no encontrado" });
+    const advance = await pool.query('SELECT * FROM advances WHERE id = $1 AND deleted_at IS NULL', [id]);
+    if (!advance.rows.length) return res.status(404).json({ error: 'Anticipo no encontrado' });
     const curr = advance.rows[0];
-    const useAmt = Math.min(Number(amount), curr.remaining);
-    if (useAmt <= 0) return res.status(400).json({ error: "Monto inválido o anticipo agotado" });
-    const newRemaining = curr.remaining - useAmt;
-    const newUsed = curr.used_amount + useAmt;
+    const useAmt = Math.min(Number(amount), Number(curr.remaining));
+    if (useAmt <= 0) return res.status(400).json({ error: 'Monto inválido o anticipo agotado' });
+    const newRemaining = Number(curr.remaining) - useAmt;
+    const newUsed = Number(curr.used_amount) + useAmt;
     await pool.query(
-      "UPDATE client_advances SET remaining = $1, used_amount = $2, updated_at = NOW() WHERE id = $3",
+      'UPDATE advances SET remaining = $1, used_amount = $2, updated_at = NOW() WHERE id = $3',
       [newRemaining, newUsed, id]
     );
     res.json({ ok: true, used: useAmt, remaining: newRemaining });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// DELETE /api/client-advances/:id - soft delete
+// DELETE /api/advances/:id - soft delete
+app.delete('/api/advances/:id', authenticate, async (req, res) => {
+  try {
+    await pool.query('UPDATE advances SET deleted_at = NOW() WHERE id = $1', [parseInt(req.params.id)]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Backward compatible aliases for client advances during testing
+app.get('/api/client-advances', authenticate, async (req, res) => {
+  try {
+    const { client_id } = req.query;
+    const params = ['client'];
+    let query = `
+      SELECT a.*, c.name as client_name
+      FROM advances a
+      LEFT JOIN contacts c ON a.entity_id = c.id
+      WHERE a.entity_type = $1 AND a.deleted_at IS NULL AND a.remaining > 0
+    `;
+    if (client_id) { params.push(client_id); query += ` AND a.entity_id = $${params.length}`; }
+    query += ' ORDER BY a.created_at DESC';
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/client-advances/by-client/:clientId', authenticate, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.*, c.name as client_name
+       FROM advances a
+       LEFT JOIN contacts c ON a.entity_id = c.id
+       WHERE a.entity_type = 'client' AND a.entity_id = $1 AND a.deleted_at IS NULL
+       ORDER BY a.created_at DESC`,
+      [parseInt(req.params.clientId)]
+    );
+    res.json(result.rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/client-advances', authenticate, async (req, res) => {
+  try {
+    const { client_id, amount, notes = '' } = req.body;
+    if (!client_id || !amount) return res.status(400).json({ error: 'Faltan campos requeridos' });
+    const remaining = Number(amount);
+    const result = await pool.query(
+      'INSERT INTO advances (entity_type, entity_id, amount, used_amount, remaining, notes, created_by) VALUES ($1, $2, $3, 0, $3, $4, $5) RETURNING *',
+      ['client', client_id, remaining, notes, req.user?.id || 1]
+    );
+    res.json(result.rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/client-advances/:id/use', authenticate, async (req, res) => {
+  try {
+    const { amount } = req.body;
+    const id = parseInt(req.params.id);
+    const advance = await pool.query('SELECT * FROM advances WHERE id = $1 AND entity_type = $2 AND deleted_at IS NULL', [id, 'client']);
+    if (!advance.rows.length) return res.status(404).json({ error: 'Anticipo no encontrado' });
+    const curr = advance.rows[0];
+    const useAmt = Math.min(Number(amount), Number(curr.remaining));
+    if (useAmt <= 0) return res.status(400).json({ error: 'Monto inválido o anticipo agotado' });
+    const newRemaining = Number(curr.remaining) - useAmt;
+    const newUsed = Number(curr.used_amount) + useAmt;
+    await pool.query('UPDATE advances SET remaining = $1, used_amount = $2, updated_at = NOW() WHERE id = $3', [newRemaining, newUsed, id]);
+    res.json({ ok: true, used: useAmt, remaining: newRemaining });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.delete('/api/client-advances/:id', authenticate, async (req, res) => {
   try {
-    await pool.query("UPDATE client_advances SET deleted_at = NOW() WHERE id = $1", [parseInt(req.params.id)]);
+    await pool.query('UPDATE advances SET deleted_at = NOW() WHERE id = $1 AND entity_type = $2', [parseInt(req.params.id), 'client']);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2778,10 +2868,37 @@ app.get('/api/purchase-orders/unpaid', authenticate, async (req, res) => {
 
 app.get('/api/purchase-orders/:id', async (req, res) => {
   try {
-    const { rows } = await pool.query(`SELECT po.*, prov.name as provider_name, ps.name as status_name, ps.color as status_color, pst.name as payment_status_name, pst.color as payment_status_color FROM purchase_orders po LEFT JOIN providers prov ON po.provider_id = prov.id LEFT JOIN purchase_statuses ps ON po.status_id = ps.id LEFT JOIN payment_statuses pst ON po.payment_status_id = pst.id WHERE po.id = $1 AND po.deleted_at IS NULL`, [req.params.id]);
+    const { rows } = await pool.query(`
+      SELECT
+        po.*, prov.name as provider_name, ps.name as status_name, ps.color as status_color,
+        pst.name as payment_status_name, pst.color as payment_status_color,
+        COALESCE(cm.paid_sum, 0) as payment_paid,
+        (po.total - COALESCE(cm.paid_sum, 0)) as payment_pending
+      FROM purchase_orders po
+      LEFT JOIN providers prov ON po.provider_id = prov.id
+      LEFT JOIN purchase_statuses ps ON po.status_id = ps.id
+      LEFT JOIN payment_statuses pst ON po.payment_status_id = pst.id
+      LEFT JOIN (
+        SELECT purchase_order_id, COALESCE(SUM(amount), 0) as paid_sum
+        FROM cash_movements
+        WHERE type = 'out' AND deleted_at IS NULL
+        GROUP BY purchase_order_id
+      ) cm ON cm.purchase_order_id = po.id
+      WHERE po.id = $1 AND po.deleted_at IS NULL
+    `, [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'No encontrado' });
     const items = await pool.query('SELECT * FROM purchase_order_items WHERE order_id = $1 AND deleted_at IS NULL', [req.params.id]);
+    const payments = await pool.query(`
+      SELECT cm.*, fa.name as account_name, prov.name as provider_name, prov.name as supplier_name, u.name as created_by_name
+      FROM cash_movements cm
+      LEFT JOIN payment_methods fa ON cm.financial_account_id = fa.id
+      LEFT JOIN providers prov ON COALESCE(cm.supplier_id, (SELECT provider_id FROM purchase_orders WHERE id = $1)) = prov.id
+      LEFT JOIN users u ON cm.created_by = u.id
+      WHERE cm.purchase_order_id = $1 AND cm.type = 'out' AND cm.deleted_at IS NULL
+      ORDER BY cm.created_at DESC
+    `, [req.params.id]);
     rows[0].items = items.rows;
+    rows[0].payments = payments.rows;
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
