@@ -3130,7 +3130,7 @@ app.post('/api/payment-movements', async (req, res) => {
     if (!session_id) {
       return res.status(400).json({ error: 'Necesitás abrir una caja antes de registrar un pago' });
     }
-    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, contact_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES ($1, 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null]);
+    const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, contact_id, supplier_id, purchase_order_id, amount, notes, client_id, created_at) VALUES ($1, 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null, req.user?.client_id || 1]);
     if (reason === 'np_payment' && purchase_order_id) {
       await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [purchase_order_id, financial_account_id, amount]);
 
