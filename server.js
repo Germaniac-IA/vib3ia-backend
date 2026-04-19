@@ -2445,11 +2445,6 @@ app.post('/api/advances/:id/use', authenticate, async (req, res) => {
         );
       }
       if (purchase_order_id) {
-        await client.query(
-          `INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at)
-           VALUES ($1, $2, $3, NOW())`,
-          [purchase_order_id, curr.financial_account_id || null, useAmt]
-        );
         await syncPurchaseOrderPaymentPaid(purchase_order_id, client);
       }
     } else {
@@ -2711,7 +2706,7 @@ app.get('/api/purchase-orders', async (req, res) => {
   try {
     const { status, payment_status } = req.query;
     let sql = `SELECT po.*, prov.name as provider_name, ps.name as status_name, ps.color as status_color, pst.name as payment_status_name, pst.color as payment_status_color,
-      (SELECT COALESCE(SUM(op.amount),0) FROM order_payments op WHERE op.order_id = po.id AND op.deleted_at IS NULL) as payment_paid
+      po.payment_paid as payment_paid
       FROM purchase_orders po
       LEFT JOIN providers prov ON po.provider_id = prov.id
       LEFT JOIN purchase_statuses ps ON po.status_id = ps.id
@@ -3498,9 +3493,10 @@ async function syncPurchaseOrderPaymentPaid(orderId, pool) {
      FROM cash_movements WHERE purchase_order_id = $1 AND deleted_at IS NULL`,
     [orderId]
   );
+  const paid = Number(rows[0].paid);
   await pool.query(
-    "UPDATE purchase_orders SET payment_paid = $1, payment_status_id = CASE WHEN $1 >= total THEN 2 ELSE (CASE WHEN $1 > 0 THEN 3 ELSE 1 END) END WHERE id = $2",
-    [rows[0].paid, orderId]
+    "UPDATE purchase_orders SET payment_paid = $1, payment_status_id = CASE WHEN $1 >= total THEN 3 ELSE (CASE WHEN $1 > 0 THEN 2 ELSE 1 END) END WHERE id = $2",
+    [paid, orderId]
   );
 }
 
