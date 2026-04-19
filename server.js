@@ -980,7 +980,7 @@ app.get('/api/orders', authenticate, async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT
-        o.id, o.order_number, o.subtotal, o.discount_type, o.discount_value, o.delivery_fee, o.total,
+        o.id, o.order_number, COALESCE(o.subtotal, 0) as subtotal, COALESCE(o.discount_value, 0) as discount_value, COALESCE(o.delivery_fee, 0) as delivery_fee, COALESCE(o.total, 0) as total,
         o.payment_method_id, o.notes, o.created_at, o.updated_at,
         o.contact_id, o.seller_id, o.sale_channel_id, o.order_status_id, o.payment_status_id,
         c.name as contact_name, c.phone as contact_phone,
@@ -990,7 +990,7 @@ app.get('/api/orders', authenticate, async (req, res) => {
         os.name as order_status_name, os.color as order_status_color,
         pst.name as payment_status_name, pst.color as payment_status_color,
         COALESCE(op.paid_sum, 0) as payment_paid,
-        o.total - COALESCE(op.paid_sum, 0) as payment_pending
+        COALESCE(o.total, 0) - COALESCE(op.paid_sum, 0) as payment_pending
       FROM orders o
       LEFT JOIN contacts c ON o.contact_id = c.id
       LEFT JOIN payment_methods pm ON o.payment_method_id = pm.id
@@ -1035,7 +1035,7 @@ app.get('/api/orders/unpaid', authenticate, async (req, res) => {
         o.contact_id,
         c.name as contact_name, c.phone as contact_phone,
         COALESCE(op.paid_sum, 0) as payment_paid,
-        o.total - COALESCE(op.paid_sum, 0) as payment_pending
+        COALESCE(o.total, 0) - COALESCE(op.paid_sum, 0) as payment_pending
       FROM orders o
       LEFT JOIN contacts c ON o.contact_id = c.id
       LEFT JOIN (
@@ -1058,7 +1058,7 @@ app.get('/api/orders/:id', authenticate, async (req, res) => {
   try {
     const orderResult = await pool.query(`
       SELECT
-        o.id, o.order_number, o.subtotal, o.discount_type, o.discount_value, o.delivery_fee, o.total,
+        o.id, o.order_number, COALESCE(o.subtotal, 0) as subtotal, COALESCE(o.discount_value, 0) as discount_value, COALESCE(o.delivery_fee, 0) as delivery_fee, COALESCE(o.total, 0) as total,
         o.payment_method_id, o.notes, o.created_at, o.updated_at,
         o.contact_id, o.seller_id, o.sale_channel_id, o.order_status_id, o.payment_status_id,
         c.name as contact_name, c.phone as contact_phone, c.email as contact_email,
@@ -1068,7 +1068,7 @@ app.get('/api/orders/:id', authenticate, async (req, res) => {
         os.name as order_status_name, os.color as order_status_color,
         pst.name as payment_status_name, pst.color as payment_status_color,
         COALESCE(op.paid_sum, 0) as payment_paid,
-        o.total - COALESCE(op.paid_sum, 0) as payment_pending
+        COALESCE(o.total, 0) - COALESCE(op.paid_sum, 0) as payment_pending
       FROM orders o
       LEFT JOIN contacts c ON o.contact_id = c.id
       LEFT JOIN payment_methods pm ON o.payment_method_id = pm.id
