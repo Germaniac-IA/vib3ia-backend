@@ -1272,7 +1272,7 @@ app.post('/api/orders/:id/payments', authenticate, async (req, res) => {
       [orderId, amount, payment_method_id, paid_at || new Date()]
     );
 
-    const paidSum = await client.query('SELECT COALESCE(SUM(amount), 0) as total FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL', [orderId]);
+    const paidSum = await client.query("SELECT COALESCE(SUM(amount), 0) as total FROM (SELECT COALESCE(SUM(amount), 0) as amount FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL UNION ALL SELECT COALESCE(SUM(amount), 0) as amount FROM cash_movements WHERE order_id = $1 AND deleted_at IS NULL) as combined", [orderId]);
     const paid = Number(paidSum.rows[0].total);
     const total = Number(order.rows[0].total);
 
