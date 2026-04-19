@@ -1227,7 +1227,13 @@ app.put('/api/orders/:id', authenticate, async (req, res) => {
 
     let discount_type_n = discount_type ?? current.rows[0].discount_type;
     let discount_value_n = discount_value ?? current.rows[0].discount_value;
-    let delivery_fee_n = Number(delivery_fee) ?? Number(current.rows[0].delivery_fee);
+    let delivery_fee_n = Number(delivery_fee);
+
+    // Only recalculate total if discount or delivery_fee actually changed
+    const delivery_fee_changed = delivery_fee !== undefined;
+    if (!delivery_fee_changed && current.rows[0].delivery_fee) {
+      delivery_fee_n = Number(current.rows[0].delivery_fee);
+    }
 
     const itemsResult = await pool.query('SELECT subtotal FROM order_items WHERE order_id = $1 AND deleted_at IS NULL', [req.params.id]);
     const subtotal = itemsResult.rows.reduce((sum, item) => sum + Number(item.subtotal), 0);
@@ -1237,7 +1243,10 @@ app.put('/api/orders/:id', authenticate, async (req, res) => {
     } else if (discount_type_n === 'fixed' && Number(discount_value_n)) {
       discountAmount = Number(discount_value_n);
     }
-    const total = Math.max(0, subtotal - discountAmount + delivery_fee_n);
+    const recalc_total = Math.max(0, subtotal - discountAmount + (isNaN(delivery_fee_n) ? 0 : delivery_fee_n));
+
+    // Only update total if discount or delivery changed
+    const total = (discount_type !== undefined || delivery_fee_changed) ? recalc_total : current.rows[0].total;
 
     const updates = [];
     const values = []
