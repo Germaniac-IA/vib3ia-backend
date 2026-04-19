@@ -2794,8 +2794,7 @@ app.get('/api/purchase-orders', async (req, res) => {
       LEFT JOIN (
         SELECT purchase_order_id, COALESCE(SUM(amount), 0) AS paid_sum
         FROM cash_movements
-        WHERE deleted_at IS NULL
-          AND (reason = 'np_payment' OR (reason = 'other_in' AND type = 'in'))
+        WHERE deleted_at IS NULL AND purchase_order_id IS NOT NULL AND type = 'out'
         GROUP BY purchase_order_id
       ) cm ON cm.purchase_order_id = po.id
       WHERE po.deleted_at IS NULL`;
@@ -2987,9 +2986,7 @@ app.get('/api/purchase-orders/unpaid', authenticate, async (req, res) => {
       LEFT JOIN (
         SELECT purchase_order_id, COALESCE(SUM(amount), 0) AS paid_sum
         FROM cash_movements
-        WHERE deleted_at IS NULL AND purchase_order_id IS NOT NULL AND type IN ('in', 'out') AND (
-          reason = 'np_payment' OR (reason = 'other_in' AND type = 'in')
-        )
+        WHERE deleted_at IS NULL AND purchase_order_id IS NOT NULL AND type = 'out'
         GROUP BY purchase_order_id
       ) cm ON cm.purchase_order_id = po.id
       WHERE po.deleted_at IS NULL
