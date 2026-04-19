@@ -1303,6 +1303,32 @@ app.put('/api/orders/:id', authenticate, async (req, res) => {
     if (order_status_id !== undefined && updated?.delivery_id) {
       await pool.query('UPDATE deliveries SET order_status_id = $1, updated_at = NOW() WHERE id = $2 AND deleted_at IS NULL', [order_status_id, updated.delivery_id]);
     }
+
+    // Recalculate payment_status if total changed (items edited, discount, etc.)
+    const recalcTotal = Number(updated.total);
+    const paidSumResult = await pool.query("SELECT COALESCE(SUM(amount), 0) as total FROM (SELECT COALESCE(SUM(amount), 0) as amount FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL UNION ALL SELECT COALESCE(SUM(amount), 0) as amount FROM cash_movements WHERE order_id = $1 AND deleted_at IS NULL) as combined", [req.params.id]);
+    const paid = Number(paidSumResult.rows[0].total);
+
+    if (recalcTotal > 0) {
+      const statusesResult = await pool.query('SELECT id, name FROM payment_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order', [req.user.client_id]);
+      const statuses = statusesResult.rows;
+
+      let newPayStatusId = null;
+      if (paid >= recalcTotal) {
+        constpagado = statuses.find(s => s.name === 'Pagado');
+        newPayStatusId =pagado?.id || statuses[statuses.length - 1]?.id;
+      } else if (paid > 0) {
+        const parcial = statuses.find(s => s.name === 'Pagado parcial');
+        newPayStatusId = parcial?.id || statuses[1]?.id;
+      } else {
+        newPayStatusId = statuses[0]?.id;
+      }
+
+      if (newPayStatusId && newPayStatusId !== updated.payment_status_id) {
+        await pool.query('UPDATE orders SET payment_status_id = $1, updated_at = NOW() WHERE id = $2', [newPayStatusId, req.params.id]);
+      }
+    }
+
     res.json(updated || null);
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
