@@ -2400,12 +2400,12 @@ app.get('/api/advances/by-entity/:entityType/:entityId', authenticate, async (re
 // POST /api/advances - create a new advance
 app.post('/api/advances', authenticate, async (req, res) => {
   try {
-    const { entity_type, entity_id, amount, notes = '' } = req.body;
+    const { entity_type, entity_id, amount, notes = '', financial_account_id } = req.body;
     if (!entity_type || !entity_id || !amount) return res.status(400).json({ error: 'Faltan campos requeridos' });
     const remaining = Number(amount);
     const result = await pool.query(
-      'INSERT INTO advances (entity_type, entity_id, amount, used_amount, remaining, notes, created_by) VALUES ($1, $2, $3, 0, $3, $4, $5) RETURNING *',
-      [entity_type, entity_id, remaining, notes, req.user?.id || 1]
+      'INSERT INTO advances (entity_type, entity_id, amount, used_amount, remaining, notes, created_by, financial_account_id) VALUES ($1, $2, $3, 0, $3, $4, $5, $6) RETURNING *',
+      [entity_type, entity_id, remaining, notes, req.user?.id || 1, financial_account_id || null]
     );
     res.json(result.rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -2413,24 +2413,87 @@ app.post('/api/advances', authenticate, async (req, res) => {
 
 // POST /api/advances/:id/use - consume part of an advance
 app.post('/api/advances/:id/use', authenticate, async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { amount } = req.body;
+    const { amount, order_id, purchase_order_id, session_id, notes = '' } = req.body;
     const id = parseInt(req.params.id);
-    const advance = await pool.query('SELECT * FROM advances WHERE id = $1 AND deleted_at IS NULL', [id]);
-    if (!advance.rows.length) return res.status(404).json({ error: 'Anticipo no encontrado' });
-    const curr = advance.rows[0];
+    const userId = req.user?.id || 1;
+    const clientId = req.user?.client_id || 1;
+    await client.query('BEGIN');
+    const { rows: advRows } = await client.query('SELECT * FROM advances WHERE id = $1 AND deleted_at IS NULL', [id]);
+    if (!advRows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Anticipo no encontrado' }); }
+    const curr = advRows[0];
     const useAmt = Math.min(Number(amount), Number(curr.remaining));
-    if (useAmt <= 0) return res.status(400).json({ error: 'Monto inválido o anticipo agotado' });
+    if (useAmt <= 0) { await client.query('ROLLBACK'); return res.status(400).json({ error: 'Monto invalido o anticipo agotado' }); }
     const newRemaining = Number(curr.remaining) - useAmt;
     const newUsed = Number(curr.used_amount) + useAmt;
-    await pool.query(
-      'UPDATE advances SET remaining = $1, used_amount = $2, updated_at = NOW() WHERE id = $3',
-      [newRemaining, newUsed, id]
-    );
+    await client.query('UPDATE advances SET remaining = $1, used_amount = $2, updated_at = NOW() WHERE id = $3', [newRemaining, newUsed, id]);
+    let effectiveSessionId = session_id;
+    if (!effectiveSessionId) {
+      const { rows: sessRows } = await client.query(
+        "SELECT id FROM cash_sessions WHERE client_id = $1 AND status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1",
+        [clientId]
+      );
+      if (sessRows.length) effectiveSessionId = sessRows[0].id;
+    }
+    if (curr.entity_type === 'provider') {
+      if (effectiveSessionId) {
+        await client.query(
+          `INSERT INTO cash_movements (client_id, created_by, session_id, session_type, type, amount, reason, notes, supplier_id, purchase_order_id, financial_account_id)
+           VALUES ($1, $2, $3, 'cash', 'out', $4, 'advance', $5, $6, $7, $8)`,
+          [clientId, userId, effectiveSessionId, useAmt, notes || `Usa anticipo #${id}`, curr.entity_id, purchase_order_id || null, curr.financial_account_id || null]
+        );
+      }
+      if (purchase_order_id) {
+        await client.query(
+          `INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at)
+           VALUES ($1, $2, $3, NOW())`,
+          [purchase_order_id, curr.financial_account_id || null, useAmt]
+        );
+        await syncPurchaseOrderPaymentPaid(purchase_order_id, client);
+      }
+    } else {
+      if (effectiveSessionId) {
+        await client.query(
+          `INSERT INTO cash_movements (client_id, created_by, session_id, type, amount, reason, notes, contact_id, order_id, financial_account_id)
+           VALUES ($1, $2, $3, 'in', $4, 'advance', $5, $6, $7, $8)`,
+          [clientId, userId, effectiveSessionId, useAmt, notes || `Usa anticipo #${id}`, curr.entity_id, order_id || null, curr.financial_account_id || null]
+        );
+      }
+      if (order_id) {
+        await client.query(
+          `INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at)
+           VALUES ($1, $2, $3, NOW())`,
+          [order_id, curr.financial_account_id || null, useAmt]
+        );
+        const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 AND client_id = $2', [order_id, clientId]);
+        const order = orderRes.rows[0];
+        if (order) {
+          const paidSum = await client.query('SELECT COALESCE(SUM(amount), 0) as total FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL', [order_id]);
+          const paid = Number(paidSum.rows[0].total);
+          const total = Number(order.total);
+          const statuses = await client.query('SELECT id, name FROM payment_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order', [clientId]);
+          let newStatusId = statuses.rows[0]?.id;
+          if (paid >= total && total > 0) {
+            const cobrado = statuses.rows.find(s => s.name === 'Cobrado');
+            newStatusId = cobrado?.id || statuses.rows[statuses.rows.length - 1]?.id;
+          } else if (paid > 0) {
+            const parcial = statuses.rows.find(s => s.name === 'Cobrado Parcial');
+            newStatusId = parcial?.id || statuses.rows[0]?.id;
+          }
+          await client.query('UPDATE orders SET payment_status_id = $1, updated_at = NOW() WHERE id = $2', [newStatusId, order_id]);
+        }
+      }
+    }
+    await client.query('COMMIT');
     res.json({ ok: true, used: useAmt, remaining: newRemaining });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
 });
-
 // DELETE /api/advances/:id - soft delete
 app.delete('/api/advances/:id', authenticate, async (req, res) => {
   try {
@@ -3413,21 +3476,71 @@ app.get('/api/cash-movements', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Recalcula y actualiza payment_paid de una orden basandose en sus cash_movements
+async function syncOrderPaymentPaid(orderId, pool) {
+  if (!orderId) return;
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(CASE WHEN type = 'in' THEN amount ELSE 0 END), 0) as paid
+     FROM cash_movements WHERE order_id = $1 AND deleted_at IS NULL`,
+    [orderId]
+  );
+  await pool.query(
+    "UPDATE orders SET payment_paid = $1, payment_status_id = CASE WHEN $1 >= total THEN 2 ELSE (CASE WHEN $1 > 0 THEN 3 ELSE 1 END) END WHERE id = $2",
+    [rows[0].paid, orderId]
+  );
+}
+
+// Recalcula y actualiza payment_paid de una purchase_order basandose en sus cash_movements
+async function syncPurchaseOrderPaymentPaid(orderId, pool) {
+  if (!orderId) return;
+  const { rows } = await pool.query(
+    `SELECT COALESCE(SUM(CASE WHEN type = 'out' THEN amount ELSE 0 END), 0) as paid
+     FROM cash_movements WHERE purchase_order_id = $1 AND deleted_at IS NULL`,
+    [orderId]
+  );
+  await pool.query(
+    "UPDATE purchase_orders SET payment_paid = $1, payment_status_id = CASE WHEN $1 >= total THEN 2 ELSE (CASE WHEN $1 > 0 THEN 3 ELSE 1 END) END WHERE id = $2",
+    [rows[0].paid, orderId]
+  );
+}
+
 // POST /api/cash-movements - create a movement
 app.post('/api/cash-movements', async (req, res) => {
+  const client = await pool.connect();
   try {
     const clientId = req.user?.client_id || 1;
     const userId = req.user?.id;
-    const { type, amount, reason, reference, notes, contact_id, supplier_id, order_id, order_number, session_id, client_name } = req.body;
-    if (!session_id) return res.status(400).json({ error: 'session_id requerido' });
+    const { type, amount, reason, reference, notes, contact_id, supplier_id, order_id, order_number, session_id, client_name, purchase_order_id } = req.body;
     if (!type || !amount) return res.status(400).json({ error: 'type y amount requeridos' });
-    const { rows } = await pool.query(
-      `INSERT INTO cash_movements (client_id, created_by, session_id, type, amount, reason, reference, notes, contact_id, supplier_id, order_id, order_number, client_name)
+    // Si no hay session_id, agarrar la primera caja abierta disponible
+    let effectiveSessionId = session_id;
+    if (!effectiveSessionId) {
+      const { rows: sessRows } = await client.query(
+        "SELECT id FROM cash_sessions WHERE client_id = $1 AND status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1",
+        [clientId]
+      );
+      if (sessRows.length > 0) {
+        effectiveSessionId = sessRows[0].id;
+      }
+    }
+    if (!effectiveSessionId) return res.status(400).json({ error: 'No hay caja abierta. Abrí una caja primero.' });
+    await client.query('BEGIN');
+    const { rows } = await client.query(
+      `INSERT INTO cash_movements (client_id, created_by, session_id, type, amount, reason, reference, notes, contact_id, supplier_id, order_id, order_number, purchase_order_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *`,
-      [clientId, userId || null, session_id, type, amount, reason || '', reference || '', notes || '', contact_id || null, supplier_id || null, order_id || null, order_number || '', client_name || '']
+      [clientId, userId || null, effectiveSessionId, type, amount, reason || '', reference || '', notes || '', contact_id || null, supplier_id || null, order_id || null, order_number || '', purchase_order_id || null]
     );
+    // Sincronizar payment_paid si viene con order_id o purchase_order_id
+    if (order_id) await syncOrderPaymentPaid(order_id, client);
+    if (purchase_order_id) await syncPurchaseOrderPaymentPaid(purchase_order_id, client);
+    await client.query('COMMIT');
     res.status(201).json(rows[0]);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: e.message });
+  } finally {
+    client.release();
+  }
 });
 
 // GET /api/cash/stats - summary stats
