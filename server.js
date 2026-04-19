@@ -1141,10 +1141,39 @@ app.post('/api/orders', authenticate, async (req, res) => {
     }
     const total = Math.max(0, subtotal - discountAmount + fee);
 
-    const statusRow = await client.query(
-      'SELECT id FROM order_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order LIMIT 1',
-      [req.user.client_id]
-    );
+    // Check has_delivery BEFORE selecting status
+    let initial_status_id = null;
+    if (sale_channel_id) {
+      const channelRow = await client.query(
+        'SELECT has_delivery FROM sale_channels WHERE id = $1 AND deleted_at IS NULL',
+        [sale_channel_id]
+      );
+      const isDelivery = channelRow.rows[0]?.has_delivery;
+
+      if (isDelivery) {
+        // Has delivery = true → use first status (Pedido/Pending)
+        const statusRow = await client.query(
+          'SELECT id FROM order_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order LIMIT 1',
+          [req.user.client_id]
+        );
+        initial_status_id = statusRow.rows[0]?.id || null;
+      } else {
+        // Has delivery = false → use "Entregado" status
+        const deliveredStatusRow = await client.query(
+          "SELECT id FROM order_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL AND LOWER(name) = 'entregado' LIMIT 1",
+          [req.user.client_id]
+        );
+        initial_status_id = deliveredStatusRow.rows[0]?.id || null;
+      }
+    } else {
+      // No channel → use first status as default
+      const statusRow = await client.query(
+        'SELECT id FROM order_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order LIMIT 1',
+        [req.user.client_id]
+      );
+      initial_status_id = statusRow.rows[0]?.id || null;
+    }
+
     const payStatusRow = await client.query(
       'SELECT id FROM payment_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order LIMIT 1',
       [req.user.client_id]
@@ -1180,7 +1209,7 @@ app.post('/api/orders', authenticate, async (req, res) => {
     `, [
       req.user.client_id, contact_id, seller_id || req.user.id, sale_channel_id,
       orderNum, subtotal, discount_type, discount_value || null, fee, total,
-      payment_method_id, statusRow.rows[0]?.id || null, payStatusRow.rows[0]?.id || null, notes
+      payment_method_id, initial_status_id || null, payStatusRow.rows[0]?.id || null, notes
     ]);
 
     const orderId = orderResult.rows[0].id;
