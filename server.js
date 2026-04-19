@@ -917,8 +917,9 @@ app.get('/api/orders/stats', authenticate, async (req, res) => {
         COALESCE(SUM(op.paid_sum), 0) as total_collected
       FROM orders o
       LEFT JOIN (
-        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
-        FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+        UNION ALL
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum FROM cash_movements WHERE order_id IS NOT NULL AND deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
       WHERE o.deleted_at IS NULL ${dateFilter}
     `, params);
@@ -998,8 +999,9 @@ app.get('/api/orders', authenticate, async (req, res) => {
       LEFT JOIN order_statuses os ON o.order_status_id = os.id
       LEFT JOIN payment_statuses pst ON o.payment_status_id = pst.id
       LEFT JOIN (
-        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
-        FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+        UNION ALL
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum FROM cash_movements WHERE order_id IS NOT NULL AND deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
       WHERE o.deleted_at IS NULL
       ORDER BY o.created_at DESC
@@ -1037,8 +1039,9 @@ app.get('/api/orders/unpaid', authenticate, async (req, res) => {
       FROM orders o
       LEFT JOIN contacts c ON o.contact_id = c.id
       LEFT JOIN (
-        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
-        FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+        UNION ALL
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum FROM cash_movements WHERE order_id IS NOT NULL AND deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
       WHERE o.deleted_at IS NULL
         AND (o.total - COALESCE(op.paid_sum, 0)) > 0
@@ -1074,8 +1077,9 @@ app.get('/api/orders/:id', authenticate, async (req, res) => {
       LEFT JOIN order_statuses os ON o.order_status_id = os.id
       LEFT JOIN payment_statuses pst ON o.payment_status_id = pst.id
       LEFT JOIN (
-        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
-        FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+        UNION ALL
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum FROM cash_movements WHERE order_id IS NOT NULL AND deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
       WHERE o.id = $1 AND o.client_id = $2
     `, [req.params.id, req.user.client_id]);
