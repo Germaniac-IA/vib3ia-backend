@@ -2996,6 +2996,14 @@ app.get('/api/purchase-orders', async (req, res) => {
       FROM purchase_orders po
       LEFT JOIN providers prov ON po.provider_id = prov.id
       LEFT JOIN purchase_statuses ps ON po.status_id = ps.id
+      LEFT JOIN (
+        SELECT order_id, COALESCE(SUM(amount), 0) AS paid_sum
+        FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
+      ) op ON op.order_id = po.id
+      LEFT JOIN (
+        SELECT purchase_order_id, COALESCE(SUM(amount), 0) AS paid_sum
+        FROM cash_movements WHERE deleted_at IS NULL AND purchase_order_id IS NOT NULL AND type = 'out' GROUP BY purchase_order_id
+      ) cm ON cm.purchase_order_id = po.id
       WHERE po.deleted_at IS NULL`;
     const params = [];
     if (status) { params.push(status); sql += ` AND ps.name = $${params.length}`; }
