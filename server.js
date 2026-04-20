@@ -1108,6 +1108,19 @@ app.get('/api/orders', authenticate, async (req, res) => {
       ORDER BY o.created_at DESC
     `);
     for (const o of result.rows) {
+      // Recalculate payment status based on actual paid amount
+      const paid = Number(o.payment_paid || 0);
+      const total = Number(o.total || 0);
+      if (total > 0 && paid >= total) {
+        o.payment_status_name = 'Pagado';
+        o.payment_status_color = '#27ae60';
+      } else if (paid > 0) {
+        o.payment_status_name = 'Pagado Parcial';
+        o.payment_status_color = '#f39c12';
+      } else {
+        o.payment_status_name = 'Impago';
+        o.payment_status_color = '#e74c3c';
+      }
       const items = await pool.query(`
         SELECT oi.*, p.name as product_name
         FROM order_items oi
@@ -1184,6 +1197,21 @@ app.get('/api/orders/:id', authenticate, async (req, res) => {
     `, [req.params.id, req.user.client_id]);
 
     if (!orderResult.rows[0]) return res.status(404).json({ error: 'No encontrado' });
+
+    // Recalculate payment status based on actual paid amount
+    const order = orderResult.rows[0];
+    const paid = Number(order.payment_paid || 0);
+    const total = Number(order.total || 0);
+    if (total > 0 && paid >= total) {
+      order.payment_status_name = 'Pagado';
+      order.payment_status_color = '#27ae60';
+    } else if (paid > 0) {
+      order.payment_status_name = 'Pagado Parcial';
+      order.payment_status_color = '#f39c12';
+    } else {
+      order.payment_status_name = 'Impago';
+      order.payment_status_color = '#e74c3c';
+    }
 
     const items = await pool.query("SELECT oi.*, COALESCE(p.name, oi.product_name) as product_name FROM order_items oi LEFT JOIN products p ON oi.product_id = p.id WHERE oi.order_id = $1 AND oi.deleted_at IS NULL", [req.params.id]);
     const payments = await pool.query(`
