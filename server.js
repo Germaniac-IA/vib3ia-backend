@@ -2335,7 +2335,7 @@ app.get('/api/leads/stats', authenticate, async (req, res) => {
   try {
     const { period } = req.query;
     let dateFilter = '';
-    const params = [];
+    const params = [req.user.client_id];
     if (period === 'today') dateFilter = "AND DATE(l.created_at) = CURRENT_DATE";
     else if (period === 'week') dateFilter = "AND DATE(l.created_at) >= DATE_TRUNC('week', CURRENT_DATE)";
     else if (period === 'month') dateFilter = "AND DATE(l.created_at) >= DATE_TRUNC('month', CURRENT_DATE)";
