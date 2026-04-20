@@ -2999,7 +2999,6 @@ app.get('/api/purchase-orders', async (req, res) => {
       WHERE po.deleted_at IS NULL`;
     const params = [];
     if (status) { params.push(status); sql += ` AND ps.name = $${params.length}`; }
-    if (payment_status) { params.push(payment_status); sql += ` AND pst.name = $${params.length}`; }
     sql += ' ORDER BY po.created_at DESC LIMIT 100';
     const { rows } = await pool.query(sql, params);
     for (const o of rows) {
