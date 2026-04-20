@@ -748,7 +748,7 @@ app.get('/api/products/:id/components', authenticate, async (req, res) => {
       `SELECT pic.id, pic.quantity, pic.input_item_id, ii.name as input_item_name, ii.unit as input_unit, ii.default_cost
        FROM product_input_components pic
        JOIN input_items ii ON pic.input_item_id = ii.id
-       WHERE pic.product_id = $1`,
+       WHERE pic.product_id = $1 AND pic.deleted_at IS NULL`,
       [req.params.id]
     );
     res.json(result.rows);
