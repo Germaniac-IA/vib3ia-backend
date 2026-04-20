@@ -2993,6 +2993,33 @@ app.post('/api/providers', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.put('/api/providers/:id', async (req, res) => {
+  try {
+    const { name, business_name, tax_id, contact_person, phone, whatsapp, email, address, notes } = req.body;
+    if (!name) return res.status(400).json({ error: 'Nombre requerido' });
+    const { rows } = await pool.query(
+      `UPDATE providers
+       SET name=$1, business_name=$2, tax_id=$3, contact_person=$4, phone=$5, whatsapp=$6, email=$7, address=$8, notes=$9, updated_at=NOW()
+       WHERE id=$10 AND deleted_at IS NULL
+       RETURNING *`,
+      [name, business_name, tax_id, contact_person, phone, whatsapp, email, address, notes, req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'No encontrado' });
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/providers/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE providers SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'No encontrado' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/purchase-orders', async (req, res) => {
   try {
     const { status, payment_status } = req.query;
