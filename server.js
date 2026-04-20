@@ -2597,7 +2597,8 @@ app.post('/api/cash-sessions/:id/close', authenticate, async (req, res) => {
     if (others.rows.length > 0) {
       const names = others.rows.map(r => r.name).join(", ");
       return res.status(400).json({
-        error: "Otros usuarios todavia tienen la caja abierta: " + names + ". Todos deben cerrarla o salir primero."
+        error: "Otros usuarios todavia tienen la caja abierta: " + names + ". Todos deben cerrarla o salir primero.",
+        users: others.rows
       });
     }
 
@@ -2616,6 +2617,19 @@ app.post('/api/cash-sessions/leave', authenticate, async (req, res) => {
     if (!user_id) return res.status(401).json({ error: 'No autorizado' });
     await pool.query("UPDATE users SET joined_session_id = NULL WHERE id = $1", [user_id]);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/cash-sessions/:id/kick-joined', authenticate, async (req, res) => {
+  try {
+    const user_id = req.user?.id;
+    if (!user_id) return res.status(401).json({ error: 'No autorizado' });
+    const session_id = parseInt(req.params.id);
+    const result = await pool.query(
+      "UPDATE users SET joined_session_id = NULL WHERE joined_session_id = $1 AND id <> $2 AND deleted_at IS NULL RETURNING id, name",
+      [session_id, user_id]
+    );
+    res.json({ ok: true, removed: result.rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
