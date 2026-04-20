@@ -3843,15 +3843,24 @@ async function syncOrderPaymentPaid(orderId, pool) {
 async function syncPurchaseOrderPaymentPaid(orderId, pool) {
   if (!orderId) return;
   const { rows } = await pool.query(
-    `SELECT COALESCE(SUM(CASE WHEN type = 'out' THEN amount ELSE 0 END), 0) as paid
+    `SELECT COALESCE(SUM(CASE WHEN type = 'out' THEN amount ELSE 0 END), 0) as paid, total
      FROM cash_movements WHERE purchase_order_id = $1 AND deleted_at IS NULL`,
     [orderId]
   );
   const paid = Number(rows[0].paid);
-  await pool.query(
-    "UPDATE purchase_orders SET payment_paid = $1, payment_status_id = CASE WHEN $1 >= total THEN 3 ELSE (CASE WHEN $1 > 0 THEN 2 ELSE 1 END) END WHERE id = $2",
-    [paid, orderId]
+  const { rows: statusRows } = await pool.query(
+    `SELECT id, LOWER(name) as name FROM payment_statuses WHERE deleted_at IS NULL ORDER BY sort_order, id`
   );
+  const statuses = {};
+  statusRows.forEach(r => { statuses[r.name] = r.id; });
+  let newStatusId = statuses['impago'] || statusRows[0]?.id;
+  if (paid >= Number(rows[0].total) && Number(rows[0].total) > 0) {
+    newStatusId = statuses['pagado'] || statusRows[statusRows.length - 1]?.id;
+  } else if (paid > 0) {
+    const parcial = Object.entries(statuses).find(([k]) => k.includes('parcial'));
+    newStatusId = parcial ? statuses[parcial[0]] : statusRows[1]?.id;
+  }
+  await pool.query("UPDATE purchase_orders SET payment_paid = $1, payment_status_id = $2 WHERE id = $3", [paid, newStatusId, orderId]);
 }
 
 // POST /api/cash-movements - create a movement
