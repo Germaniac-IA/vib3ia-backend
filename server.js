@@ -23,8 +23,37 @@ const pool = new Pool({
 app.use(cors());
 app.use(bodyParser.json({ limit: '50mb' }));
 
-// ─── MIDDLEWARE: Auth ──────────────────────────────────────────────
-function authenticate(req, res, next) {
+// ─── GLOBAL MIDDLEWARE: Agent API Key (runs before every request) ──
+app.use(agentAuth);
+
+// ─── MIDDLEWARE: Agent API Key Auth ──────────────────────────────
+async function agentAuth(req, res, next) {
+  const agentKey = req.headers['x-agent-key'];
+  if (!agentKey) return next(); // No agent key, continue to JWT auth
+
+  try {
+    const result = await pool.query(
+      'SELECT a.id, a.name, a.client_id, a.autonomy_level FROM agent_api_keys ak JOIN agents a ON ak.agent_id = a.id WHERE ak.api_key = $1 AND ak.is_active = true AND a.is_active = true',
+      [agentKey]
+    );
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Agent API key inválida' });
+
+    const agent = result.rows[0];
+    req.user = { id: agent.id, name: agent.name, client_id: agent.client_id, rol: 'agent', autonomy_level: agent.autonomy_level, is_agent: true };
+
+    // Update last_used_at
+    await pool.query('UPDATE agent_api_keys SET last_used_at = NOW() WHERE api_key = $1', [agentKey]);
+    next();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+}
+
+// ─── MIDDLEWARE: Auth (JWT) ─────────────────────────────────────────
+async function authenticate(req, res, next) {
+  // Already authenticated via agent API key?
+  if (req.user && req.user.is_agent) return next();
+
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'No autorizado' });
@@ -329,6 +358,80 @@ app.delete('/api/agents/:id', authenticate, async (req, res) => {
   }
 });
 
+// ─── AGENT CAPABILITIES ────────────────────────────────────────────
+app.get('/api/agent-capabilities', authenticate, async (req, res) => {
+  try {
+    const clientId = req.query.client_id || req.user.client_id;
+    const category = req.query.category;
+    let query = 'SELECT capability, method, endpoint, description, category, params FROM agent_capabilities WHERE client_id = $1 AND is_active = true';
+    const params = [clientId];
+    if (category) {
+      query += ' AND category = $2';
+      params.push(category);
+    }
+    query += ' ORDER BY category, capability';
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── AGENT INSTRUCTIONS ───────────────────────────────────────────
+app.get('/api/agent-instructions', authenticate, async (req, res) => {
+  try {
+    const agentId = req.query.agent_id || req.user.client_id;
+    const type = req.query.type;
+    let query = 'SELECT * FROM agent_instructions WHERE agent_id = $1 AND is_active = true';
+    const params = [agentId];
+    if (type) {
+      query += ' AND type = $2';
+      params.push(type);
+    }
+    query += ' ORDER BY sort_order, id';
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/agent-instructions', authenticate, async (req, res) => {
+  try {
+    const { agent_id, type, content, sort_order } = req.body;
+    if (!type || !content) return res.status(400).json({ error: 'Faltan campos requeridos' });
+    const result = await pool.query(
+      'INSERT INTO agent_instructions (agent_id, type, content, sort_order) VALUES ($1, $2, $3, $4) RETURNING *',
+      [agent_id || 1, type, content, sort_order || 0]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/agent-instructions/:id', authenticate, async (req, res) => {
+  try {
+    const { type, content, sort_order, is_active } = req.body;
+    const result = await pool.query(
+      'UPDATE agent_instructions SET type=COALESCE($1,type), content=COALESCE($2,content), sort_order=COALESCE($3,sort_order), is_active=COALESCE($4,is_active), updated_at=NOW() WHERE id=$5 RETURNING *',
+      [type, content, sort_order, is_active, req.params.id]
+    );
+    res.json(result.rows[0] || null);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/agent-instructions/:id', authenticate, async (req, res) => {
+  try {
+    await pool.query('UPDATE agent_instructions SET is_active = false WHERE id = $1', [req.params.id]);
+    res.json({ message: 'Eliminado' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── PAYMENT METHODS ───────────────────────────────────────────────
 app.get('/api/payment-methods', authenticate, async (req, res) => {
   try {
@@ -564,9 +667,9 @@ app.put('/api/products/:id', authenticate, async (req, res) => {
 
     const result = await pool.query(
       `UPDATE products SET 
-        sku=$1, sku_externo=COALESCE($2,sku_externo), name=COALESCE($3,name), description=COALESCE($4,description),
+        sku=COALESCE($1,sku), sku_externo=COALESCE($2,sku_externo), name=COALESCE($3,name), description=COALESCE($4,description),
         commercial_description=NULLIF($5,''),
-        category_id=$6, brand_id=$7, price=COALESCE($8,price),
+        category_id=COALESCE($6,category_id), brand_id=COALESCE($7,brand_id), price=COALESCE($8,price),
         unit=COALESCE($9,unit), stock_quantity=COALESCE($10,stock_quantity), min_stock=COALESCE($11,min_stock),
         requires_stock=COALESCE($12,requires_stock), is_premium=COALESCE($13,is_premium), premium_level=COALESCE($14,premium_level),
         cost_price=COALESCE($15,cost_price), is_active=COALESCE($16,is_active), image_url=NULLIF($17,''), updated_at=NOW()
