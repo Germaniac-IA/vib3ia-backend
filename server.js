@@ -2632,13 +2632,7 @@ app.post('/api/advances/:id/use', authenticate, async (req, res) => {
       if (sessRows.length) effectiveSessionId = sessRows[0].id;
     }
     if (curr.entity_type === 'provider') {
-      if (effectiveSessionId) {
-        await client.query(
-          `INSERT INTO cash_movements (client_id, created_by, session_id, session_type, type, amount, reason, notes, supplier_id, purchase_order_id, financial_account_id)
-           VALUES ($1, $2, $3, 'cash', 'out', $4, 'advance', $5, $6, $7, $8)`,
-          [clientId, userId, effectiveSessionId, useAmt, notes || `Usa anticipo #${id}`, curr.entity_id, purchase_order_id || null, curr.financial_account_id || null]
-        );
-      }
+      // Provider advance - NO cash_movement here (already recorded when advance was created)
       if (purchase_order_id) {
         await syncPurchaseOrderPaymentPaid(purchase_order_id, client);
       }
