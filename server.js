@@ -2982,25 +2982,20 @@ app.post('/api/providers', async (req, res) => {
 app.get('/api/purchase-orders', async (req, res) => {
   try {
     const { status, payment_status } = req.query;
-    let sql = `SELECT po.*, prov.name as provider_name, ps.name as status_name, ps.color as status_color, pst.name as payment_status_name, pst.color as payment_status_color,
+    let sql = `SELECT po.*, prov.name as provider_name, ps.name as status_name, ps.color as status_color,
+      CASE WHEN GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) >= po.total AND po.total > 0 THEN 'Pagado'
+           WHEN GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) > 0 THEN 'Pagado parcial'
+           ELSE 'Impago'
+      END as payment_status_name,
+      CASE WHEN GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) >= po.total AND po.total > 0 THEN (SELECT color FROM payment_statuses WHERE LOWER(name) = 'pagado' AND deleted_at IS NULL LIMIT 1)
+           WHEN GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) > 0 THEN (SELECT color FROM payment_statuses WHERE name LIKE '%Parcial%' AND deleted_at IS NULL LIMIT 1)
+           ELSE (SELECT color FROM payment_statuses WHERE LOWER(name) = 'impago' AND deleted_at IS NULL LIMIT 1)
+      END as payment_status_color,
       GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) as payment_paid,
       (po.total - GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0))) as payment_pending
       FROM purchase_orders po
       LEFT JOIN providers prov ON po.provider_id = prov.id
       LEFT JOIN purchase_statuses ps ON po.status_id = ps.id
-      LEFT JOIN payment_statuses pst ON po.payment_status_id = pst.id
-      LEFT JOIN (
-        SELECT order_id, COALESCE(SUM(amount), 0) AS paid_sum
-        FROM order_payments
-        WHERE deleted_at IS NULL
-        GROUP BY order_id
-      ) op ON op.order_id = po.id
-      LEFT JOIN (
-        SELECT purchase_order_id, COALESCE(SUM(amount), 0) AS paid_sum
-        FROM cash_movements
-        WHERE deleted_at IS NULL AND purchase_order_id IS NOT NULL AND type = 'out'
-        GROUP BY purchase_order_id
-      ) cm ON cm.purchase_order_id = po.id
       WHERE po.deleted_at IS NULL`;
     const params = [];
     if (status) { params.push(status); sql += ` AND ps.name = $${params.length}`; }
