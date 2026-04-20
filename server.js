@@ -2643,13 +2643,8 @@ app.post('/api/advances/:id/use', authenticate, async (req, res) => {
         await syncPurchaseOrderPaymentPaid(purchase_order_id, client);
       }
     } else {
-      if (effectiveSessionId) {
-        await client.query(
-          `INSERT INTO cash_movements (client_id, created_by, session_id, type, amount, reason, notes, contact_id, order_id, financial_account_id)
-           VALUES ($1, $2, $3, 'in', $4, 'advance', $5, $6, $7, $8)`,
-          [clientId, userId, effectiveSessionId, useAmt, notes || `Usa anticipo #${id}`, curr.entity_id, order_id || null, curr.financial_account_id || null]
-        );
-      }
+      // Client advance - NO cash_movement here (already recorded when advance was created)
+      // Only record as order_payment and update advance remaining
       if (order_id) {
         await client.query(
           `INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at)
