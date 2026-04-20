@@ -1091,8 +1091,8 @@ app.get('/api/orders', authenticate, async (req, res) => {
         sc.name as sale_channel_name,
         os.name as order_status_name, os.color as order_status_color,
         pst.name as payment_status_name, pst.color as payment_status_color,
-        COALESCE(op.paid_sum, 0) as payment_paid,
-        COALESCE(o.total, 0) - COALESCE(op.paid_sum, 0) as payment_pending
+        GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) as payment_paid,
+        COALESCE(o.total, 0) - GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) as payment_pending
       FROM orders o
       LEFT JOIN contacts c ON o.contact_id = c.id
       LEFT JOIN payment_methods pm ON o.payment_method_id = pm.id
@@ -1104,6 +1104,10 @@ app.get('/api/orders', authenticate, async (req, res) => {
         SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
         FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
+      LEFT JOIN (
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
+        FROM cash_movements WHERE deleted_at IS NULL AND order_id IS NOT NULL AND type = 'in' GROUP BY order_id
+      ) cm ON cm.order_id = o.id
       WHERE o.deleted_at IS NULL
       ORDER BY o.created_at DESC
     `);
@@ -1148,16 +1152,20 @@ app.get('/api/orders/unpaid', authenticate, async (req, res) => {
         o.id, o.order_number, o.total,
         o.contact_id,
         c.name as contact_name, c.phone as contact_phone,
-        COALESCE(op.paid_sum, 0) as payment_paid,
-        COALESCE(o.total, 0) - COALESCE(op.paid_sum, 0) as payment_pending
+        GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) as payment_paid,
+        COALESCE(o.total, 0) - GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) as payment_pending
       FROM orders o
       LEFT JOIN contacts c ON o.contact_id = c.id
       LEFT JOIN (
         SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
         FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
+      LEFT JOIN (
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
+        FROM cash_movements WHERE deleted_at IS NULL AND order_id IS NOT NULL AND type = 'in' GROUP BY order_id
+      ) cm ON cm.order_id = o.id
       WHERE o.deleted_at IS NULL
-        AND (o.total - COALESCE(op.paid_sum, 0)) > 0
+        AND (o.total - GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0))) > 0
         ${contactFilter}
       ORDER BY o.created_at DESC
     `, params);
@@ -1180,8 +1188,8 @@ app.get('/api/orders/:id', authenticate, async (req, res) => {
         sc.name as sale_channel_name,
         os.name as order_status_name, os.color as order_status_color,
         pst.name as payment_status_name, pst.color as payment_status_color,
-        COALESCE(op.paid_sum, 0) as payment_paid,
-        COALESCE(o.total, 0) - COALESCE(op.paid_sum, 0) as payment_pending
+        GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) as payment_paid,
+        COALESCE(o.total, 0) - GREATEST(COALESCE(op.paid_sum, 0), COALESCE(cm.paid_sum, 0)) as payment_pending
       FROM orders o
       LEFT JOIN contacts c ON o.contact_id = c.id
       LEFT JOIN payment_methods pm ON o.payment_method_id = pm.id
@@ -1193,6 +1201,10 @@ app.get('/api/orders/:id', authenticate, async (req, res) => {
         SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
         FROM order_payments WHERE deleted_at IS NULL GROUP BY order_id
       ) op ON op.order_id = o.id
+      LEFT JOIN (
+        SELECT order_id, COALESCE(SUM(amount), 0) as paid_sum
+        FROM cash_movements WHERE deleted_at IS NULL AND order_id IS NOT NULL AND type = 'in' GROUP BY order_id
+      ) cm ON cm.order_id = o.id
       WHERE o.id = $1 AND o.client_id = $2
     `, [req.params.id, req.user.client_id]);
 
@@ -1240,7 +1252,8 @@ app.post('/api/orders', authenticate, async (req, res) => {
       contact_id, seller_id, sale_channel_id,
       discount_type, discount_value,
       payment_method_id, notes, items, delivery,
-      order_status_id, delivery_fee
+      order_status_id, delivery_fee,
+      advance_id, advance_amount, effective_cash_amount
     } = req.body;
 
     const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
@@ -1353,6 +1366,68 @@ app.post('/api/orders', authenticate, async (req, res) => {
           [orderId, orderResult.rows[0].contact_id, delivery?.address || '', delivery?.location || '', delivery?.scheduled_date || null, delivery?.scheduled_time || '', fee, delivery?.notes || '', req.user.client_id]
         );
       }
+    }
+
+    // ── Process client advance (inside transaction) ──
+    if (advance_id && Number(advance_amount) > 0) {
+      const { rows: advRows } = await client.query('SELECT * FROM advances WHERE id = $1 AND deleted_at IS NULL', [advance_id]);
+      if (advRows.length > 0) {
+        const adv = advRows[0];
+        const useAmt = Math.min(Number(advance_amount), Number(adv.remaining));
+        if (useAmt > 0) {
+          const newRemaining = Number(adv.remaining) - useAmt;
+          const newUsed = Number(adv.used_amount) + useAmt;
+          await client.query('UPDATE advances SET remaining = $1, used_amount = $2, updated_at = NOW() WHERE id = $3', [newRemaining, newUsed, advance_id]);
+          // Create order_payment for the advance (no cash_movement — already recorded when advance was created)
+          await client.query(
+            `INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at)
+             VALUES ($1, $2, $3, NOW())`,
+          [orderId, null, useAmt]
+        );
+        }
+      }
+    }
+
+    // ── Process cash payment (efectivo) ──
+    const cashAmount = Number(effective_cash_amount) || 0;
+    if (cashAmount > 0) {
+      const { rows: userRows } = await client.query("SELECT joined_session_id FROM users WHERE id = $1", [req.user.id]);
+      let session_id = userRows[0]?.joined_session_id || null;
+      if (!session_id) {
+        const { rows: sessRows } = await client.query("SELECT id FROM cash_sessions WHERE user_id = $1 AND session_type='cash' AND status='open' AND deleted_at IS NULL ORDER BY id DESC LIMIT 1", [req.user.id]);
+        session_id = sessRows[0]?.id || null;
+      }
+      if (session_id) {
+        await client.query(
+          `INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, amount, order_id)
+           VALUES ($1, 'cash', $2, 'in', 'nv_payment', $3, $4)`,
+          [session_id, payment_method_id || null, cashAmount, orderId]
+        );
+      }
+      await client.query(
+        `INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at)
+         VALUES ($1, $2, $3, NOW())`,
+        [orderId, payment_method_id || null, cashAmount]
+      );
+    }
+
+    // Update payment status after processing advance and/or cash
+    const { rows: opRes } = await client.query('SELECT COALESCE(SUM(amount), 0) as total FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL', [orderId]);
+    const paidFromPayments = Number(opRes[0].total);
+    const { rows: cmRes } = await client.query("SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE order_id = $1 AND deleted_at IS NULL AND type = 'in'", [orderId]);
+    const paidFromCash = Number(cmRes[0].total);
+    const totalPaid = Math.max(paidFromPayments, paidFromCash);
+    const statuses = await client.query('SELECT id, name FROM payment_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order', [req.user.client_id]);
+    let newStatusId = statuses.rows[0]?.id;
+    if (totalPaid >= total && total > 0) {
+      const cobrado = statuses.rows.find(s => s.name === 'Pagado');
+      newStatusId = cobrado?.id || statuses.rows[statuses.rows.length - 1]?.id;
+    } else if (totalPaid > 0) {
+      const parcial = statuses.rows.find(s => s.name.includes('Parcial'));
+      newStatusId = parcial?.id || statuses.rows[1]?.id || newStatusId;
+    }
+    if (newStatusId) {
+      await client.query('UPDATE orders SET payment_status_id = $1 WHERE id = $2', [newStatusId, orderId]);
     }
 
     await client.query('COMMIT');
@@ -2643,13 +2718,14 @@ app.post('/api/advances/:id/use', authenticate, async (req, res) => {
         await client.query(
           `INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at)
            VALUES ($1, $2, $3, NOW())`,
-          [order_id, curr.financial_account_id || null, useAmt]
+          [order_id, null, useAmt]
         );
         const orderRes = await client.query('SELECT * FROM orders WHERE id = $1 AND client_id = $2', [order_id, clientId]);
         const order = orderRes.rows[0];
         if (order) {
           const paidSum = await client.query('SELECT COALESCE(SUM(amount), 0) as total FROM order_payments WHERE order_id = $1 AND deleted_at IS NULL', [order_id]);
-          const paid = Number(paidSum.rows[0].total);
+          const { rows: cashSum } = await client.query("SELECT COALESCE(SUM(amount), 0) as total FROM cash_movements WHERE order_id = $1 AND deleted_at IS NULL AND type = 'in'", [order_id]);
+          const paid = Math.max(Number(paidSum.rows[0].total), Number(cashSum[0].total));
           const total = Number(order.total);
           const statuses = await client.query('SELECT id, name FROM payment_statuses WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL ORDER BY sort_order', [clientId]);
           let newStatusId = statuses.rows[0]?.id;
@@ -2805,7 +2881,6 @@ app.post('/api/cash-movements', authenticate, async (req, res) => {
     const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, client_id, supplier_id, purchase_order_id, amount, notes, created_at) VALUES (COALESCE($1, (SELECT id FROM cash_sessions WHERE status = 'open' AND deleted_at IS NULL ORDER BY opened_at DESC LIMIT 1)), 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, cash_client_id, supplier_id || null, purchase_order_id || null, amount, notes || null]);
     if (['nv_payment', 'sale'].includes(reason) && order_id) {
       if (reason === 'nv_payment') {
-        await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [order_id, financial_account_id, amount]);
       }
 
       const orderRes = await pool.query("SELECT id, total, client_id FROM orders WHERE id = $1", [order_id]);
@@ -2934,7 +3009,7 @@ app.get('/api/purchase-orders', async (req, res) => {
 
 app.post('/api/purchase-orders', async (req, res) => {
   try {
-    const { provider_id, notes, delivery_fee, discount_type, discount_value, items, payment_method_id, payment_amount } = req.body;
+    const { provider_id, notes, delivery_fee, discount_type, discount_value, items, payment_method_id, payment_amount, advance_id, advance_amount } = req.body;
     const subtotal = items ? items.reduce((s, i) => s + i.quantity * i.unit_price, 0) : 0;
     let discount = 0;
     if (discount_type === 'percent' && discount_value) discount = subtotal * (discount_value / 100);
@@ -2974,7 +3049,6 @@ app.post('/api/purchase-orders', async (req, res) => {
         "INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, amount, purchase_order_id) VALUES ($1,'cash',$2,'out','np_payment',$3,$4)",
         [session_id, payment_method_id, payment_amount, order.id]
       );
-      await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [order.id, payment_method_id, payment_amount]);
       // Actualizar payment_status a Pagado si el monto cubre el total
       if (Number(payment_amount) >= total) {
         const { rows: cobrRows } = await pool.query("SELECT id FROM payment_statuses WHERE LOWER(name) = 'pagado' LIMIT 1");
@@ -2982,6 +3056,42 @@ app.post('/api/purchase-orders', async (req, res) => {
       } else {
         const { rows: parcRows } = await pool.query("SELECT id FROM payment_statuses WHERE LOWER(name) = 'pagado parcial' LIMIT 1");
         if (parcRows[0]) await pool.query("UPDATE purchase_orders SET payment_status_id = $1 WHERE id = $2", [parcRows[0].id, order.id]);
+      }
+    }
+    // Si hay anticipo de proveedor, usarlo contra esta NP
+    if (advance_id && Number(advance_amount) > 0) {
+      const user_id = req.user?.id || 1;
+      const { rows: advRows } = await pool.query('SELECT * FROM advances WHERE id = $1 AND deleted_at IS NULL', [advance_id]);
+      if (advRows.length > 0) {
+        const adv = advRows[0];
+        const useAmt = Math.min(Number(advance_amount), Number(adv.remaining));
+        if (useAmt > 0) {
+          const newRemaining = Number(adv.remaining) - useAmt;
+          const newUsed = Number(adv.used_amount) + useAmt;
+          await pool.query('UPDATE advances SET remaining = $1, used_amount = $2, updated_at = NOW() WHERE id = $3', [newRemaining, newUsed, advance_id]);
+          // Buscar session activa
+          const { rows: userRows } = await pool.query("SELECT joined_session_id FROM users WHERE id = $1", [user_id]);
+          let session_id = userRows[0]?.joined_session_id || null;
+          if (!session_id) {
+            const { rows: sessRows } = await pool.query("SELECT id FROM cash_sessions WHERE user_id = $1 AND session_type='cash' AND status='open' AND deleted_at IS NULL ORDER BY id DESC LIMIT 1", [user_id]);
+            session_id = sessRows[0]?.id || null;
+          }
+          if (session_id) {
+            await pool.query(
+              `INSERT INTO cash_movements (client_id, created_by, session_id, session_type, type, amount, reason, notes, supplier_id, purchase_order_id)
+               VALUES ($1, $2, $3, 'cash', 'out', $4, 'advance', $5, $6, $7)`,
+              [req.user?.client_id || 1, user_id, session_id, useAmt, `Usa anticipo #${advance_id}`, adv.entity_id, order.id]
+            );
+          }
+          // Recalcular payment_paid total y status
+          const { rows: cmRes } = await pool.query("SELECT COALESCE(SUM(amount), 0) as paid FROM cash_movements WHERE purchase_order_id = $1 AND deleted_at IS NULL", [order.id]);
+          const totalPaid = Number(cmRes[0].paid);
+          const { rows: statusRows2 } = await pool.query("SELECT id, LOWER(name) as name FROM payment_statuses WHERE client_id = $1 AND deleted_at IS NULL AND is_active = true ORDER BY sort_order, id", [req.user?.client_id || 1]);
+          let newStatusId = statusRows2[0]?.id || null;
+          if (totalPaid >= total) newStatusId = statusRows2.find(r => r.name === 'pagado')?.id || statusRows2[statusRows2.length - 1]?.id || newStatusId;
+          else if (totalPaid > 0) newStatusId = statusRows2.find(r => r.name.includes('pagado parcial') || r.name.includes('parcial'))?.id || statusRows2[1]?.id || newStatusId;
+          if (newStatusId) await pool.query("UPDATE purchase_orders SET payment_paid = $1, payment_status_id = $2 WHERE id = $3", [totalPaid, newStatusId, order.id]);
+        }
       }
     }
     res.json(order);
@@ -3277,7 +3387,6 @@ app.post('/api/payment-movements', async (req, res) => {
     }
     const { rows } = await pool.query("INSERT INTO cash_movements (session_id, session_type, financial_account_id, type, reason, order_id, contact_id, supplier_id, purchase_order_id, amount, notes, client_id, created_at) VALUES ($1, 'cash', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) RETURNING *", [session_id, financial_account_id, type, reason, order_id || null, contact_id || null, supplier_id || null, purchase_order_id || null, amount, notes || null, req.user?.client_id || 1]);
     if (reason === 'np_payment' && purchase_order_id) {
-      await pool.query("INSERT INTO order_payments (order_id, payment_method_id, amount, paid_at) VALUES ($1, $2, $3, NOW())", [purchase_order_id, financial_account_id, amount]);
 
       const poRes = await pool.query("SELECT id, total, client_id FROM purchase_orders WHERE id = $1", [purchase_order_id]);
       if (poRes.rows[0]) {
@@ -3338,6 +3447,38 @@ app.get('/api/payment/stats', async (req, res) => {
 });
 
 // ===================== DELIVERIES =====================
+// GET /api/deliveries/:id/detail - full delivery info for driver modal
+app.get('/api/deliveries/:id/detail', authenticate, async (req, res) => {
+  try {
+    const clientId = req.user?.client_id || 1;
+    const { rows: deliveryRows } = await pool.query(
+      `SELECT d.*, o.order_number, o.total as order_total,
+              c.name as contact_name, c.phone as contact_phone, c.address as contact_address,
+              os.name as status_name, os.color as status_color
+       FROM deliveries d
+       JOIN orders o ON d.order_id = o.id
+       LEFT JOIN contacts c ON d.contact_id = c.id
+       LEFT JOIN order_statuses os ON o.order_status_id = os.id
+       WHERE d.id = $1 AND d.client_id = $2 AND d.deleted_at IS NULL`,
+      [req.params.id, clientId]
+    );
+    if (!deliveryRows[0]) return res.status(404).json({ error: 'No encontrado' });
+    const delivery = deliveryRows[0];
+
+    // Get order items
+    const { rows: items } = await pool.query(
+      `SELECT oi.quantity, oi.unit_price,
+              COALESCE(p.name, oi.product_name) as product_name
+       FROM order_items oi
+       LEFT JOIN products p ON oi.product_id = p.id
+       WHERE oi.order_id = $1 AND oi.deleted_at IS NULL`,
+      [delivery.order_id]
+    );
+
+    res.json({ ...delivery, items });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /api/deliveries - list with order info + contact + status color
 app.get('/api/deliveries', async (req, res) => {
   try {
