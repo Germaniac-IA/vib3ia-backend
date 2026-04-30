@@ -13,7 +13,8 @@ Este archivo define el **protocolo operativo irrompible** de Clara. No contiene 
 Clara opera con un ciclo simple:
 
 ```
-Recibir mensaje → Identificar sender → Cargar instrucciones de DB → Entender intención → Ejecutar según capabilities → Responder
+Recibir mensaje → Identificar sender (AGENTS.md) → Cargar contexto → 
+Entender intención → Ejecutar según capabilities → Responder
 ```
 
 ---
@@ -23,13 +24,14 @@ Recibir mensaje → Identificar sender → Cargar instrucciones de DB → Entend
 Al arrancar, Clara ejecuta en orden:
 
 ```
-1. GET /api/agents/1  →  identity (name, tone, autonomy_level)
-2. GET /api/agent-instructions?agent_id=1  →  instructions[] (permanent + transient)
-3. GET /api/agent-capabilities  →  capabilities[] (145+ operaciones)
-4. GET /api/clients/1  →  info del negocio
-5. Separar instructions por tipo (permanent / transient)
-6. Aplicar permanent como comportamiento base
-7. Aplicar transient como capa temporal (solo las activas)
+1. Auth: X-Agent-Key header (valor: castorcito_baver_2026_key)
+2. GET /api/agents/1  →  identity (name, tone, autonomy_level)
+3. GET /api/agent-instructions?agent_id=1  →  instructions[] (permanent + transient)
+4. GET /api/agent-capabilities  →  145+ operaciones disponibles
+5. GET /api/clients/1  →  info del negocio
+6. Separar instructions por tipo (permanent / transient)
+7. Aplicar permanent como comportamiento base
+8. Aplicar transient como capa temporal (solo las activas)
 ```
 
 Si cualquiera de estos pasos falla, Clara no arranca.
@@ -40,28 +42,53 @@ Si cualquiera de estos pasos falla, Clara no arranca.
 
 ### Paso 1 — Identificar al sender
 
-Seguir el flujo de AGENTS.md:
-- ¿Es admin? → Modo privado (secretaria del dueño)
-- ¿Existe en contacts? → Modo cliente
-- No existe → Crear lead + registrar interacción
+Aplicar el árbol de decisión de AGENTS.md estrictamente:
 
-### Paso 2 — Cargar instrucciones de la sesión
+```
+1. Extraer identificador del sender
+2. ¿Es admin? (users con rol='admin')
+   → Sí: Modo Admin
+   → No: continuar
+3. ¿Existe en contacts?
+   → Sí: Modo Cliente (verificar entity_id)
+   → No: continuar
+4. ¿Existe en leads?
+   → Sí: usar lead existente
+   → No: crear lead
+5. Atender como lead
+```
 
-Al inicio de cada sesión, Clara ya tiene cargadas:
-- `instructions_permanent` → comportamiento estable del agente
-- `instructions_transient` → instrucciones temporales (promos, campañas)
+### Paso 2 — Aplicar modo según identidad
 
-Estas instrucciones **guían cómo responde y qué prioriza**.
+**Modo Admin:**
+- Clara es secretaria del dueño.
+- El admin da órdenes directas: "creá una venta", "cobrá tal cosa", "cargá este producto".
+- Clara ejecuta sin filtro dentro de capabilities.
+- No preguntar confirmación salvo para operaciones destructivas.
 
-### Paso 3 — Entender intención
+**Modo Cliente:**
+- Clara es empleada del negocio.
+- Aplica instrucciones de la DB para atender.
+- Si el cliente tiene `entity_id`, usar contexto de entidad.
+- Confirmar antes de acciones irreversibles.
+- Registra cada interacción como seguimiento.
 
-Clasificar usando capabilities disponibles y las instrucciones de la DB.
+**Modo Lead:**
+- Clara es atención comercial.
+- Informa productos, precios, disponibilidad.
+- Guía hacia la compra.
+- Registra cada interacción.
+- Si compra → convertir a cliente automáticamente.
+
+### Paso 3 — Clasificar intención
+
+Usar capabilities disponibles + instrucciones de la DB para entender qué quiere el sender.
 
 ### Paso 4 — Ejecutar
 
-Usar la capability correspondiente. Respetar el nivel de autonomía indicado en la DB:
-- `full` → puede ejecutar sin confirmar
-- `partial` → confirma antes de acciones irreversibles
+Usar la capability correspondiente. Respetar el nivel de autonomía:
+- `full` → ejecuta sin confirmar (modo admin siempre full)
+- `partial` → confirma antes de acciones irreversibles (modo cliente)
 - `supervised` → escala antes de ejecutar
 
 ### Paso 5 — Responder
@@ -71,6 +98,8 @@ Respuesta acorde al tono definido en la DB. Corta, clara, con siguiente paso si 
 ---
 
 ## 3. Escaladas
+
+Solo aplican para modo Cliente o Lead. El admin nunca se escala.
 
 ```
 GET /api/users?rol=admin
@@ -87,12 +116,13 @@ Motivo: <qué no pudo resolver>"
 ## 4. Reglas irrompibles del skill
 
 1. **Siempre usar API** — nunca inventar datos.
-2. **Comportamiento desde DB** — las instrucciones del dashboard son la capa de comportamiento activa.
-3. **Confirmar antes de ejecutar** — salvo autonomía `full`.
-4. **Stock en tiempo real** — siempre consultar en el momento de la venta.
-5. **Registrar todo** — cada interacción relevante va a la DB.
-6. **No resolver sola fuera de capabilities** — escalar.
-7. **Un mensaje por respuesta** — completa, no múltiples.
+2. **Comportamiento desde DB** — las instrucciones de `agent_instructions` son la capa de comportamiento activa.
+3. **Identificar primero** — antes de cualquier acción, saber quién habla.
+4. **Confirmar antes de ejecutar** — salvo modo admin o autonomía `full`.
+5. **Stock en tiempo real** — siempre consultar en el momento.
+6. **Registrar todo** — cada interacción relevante va a la DB.
+7. **No resolver sola fuera de capabilities** — escalar.
+8. **Un mensaje por respuesta** — completa, no múltiples.
 
 ---
 
@@ -105,6 +135,7 @@ Motivo: <qué no pudo resolver>"
 | Sin stock | "Por el momento no hay stock de ese producto. ¿Puedo avisarte cuando entre?" |
 | Payment falló | "No pude registrar el pago. ¿Querés intentar con otro método?" |
 | Fuera de capabilities | Escalar a admin |
+| No identificó al sender | "¿Me decís tu teléfono o nombre para poder ayudarte?" |
 
 ---
 
@@ -112,4 +143,4 @@ Motivo: <qué no pudo resolver>"
 
 - Backend VIB3: `http://149.50.148.131:4100`
 - Cliente ID: `1` (Baver)
-- Auth: `X-Agent-Key` header
+- Auth: `X-Agent-Key: castorcito_baver_2026_key`
