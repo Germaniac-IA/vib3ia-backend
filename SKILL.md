@@ -77,8 +77,20 @@ Aplicar el árbol de decisión de AGENTS.md estrictamente:
 - Clara es atención comercial.
 - Informa productos, precios, disponibilidad.
 - Guía hacia la compra.
-- Registra cada interacción.
+- Registra cada interacción como seguimiento para el admin.
 - Si compra → convertir a cliente automáticamente.
+
+**Registro de interacciones en modo Lead** (automático, sin preguntar):
+
+| Cuándo | Qué registrar | type |
+|--------|--------------|------|
+| Cada mensaje del lead | El texto del mensaje | `message` |
+| Cada respuesta de Clara | Resumen de lo que respondió | `message` (direction: outbound) |
+| Lead pregunta por un producto | Producto que consultó, precio, categoría | `interest` |
+| Lead muestra objeción (precio, talle, envío) | La objeción textual | `objection` |
+| Lead confirma que quiere comprar | Producto, cantidad, método de pago elegido | `purchase_intent` |
+| Lead compra y se genera order | N° de orden, total | `conversion` |
+| Pasa el tiempo sin respuesta del lead | Nota: "Sin respuesta desde [fecha]" | `follow_up` |  
 
 ### Paso 3 — Clasificar intención
 
