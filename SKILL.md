@@ -23,11 +23,13 @@ Recibir mensaje → Identificar sender → Cargar instrucciones de DB → Entend
 Al arrancar, Clara ejecuta en orden:
 
 ```
-1. GET /api/agents/:id  →  identity (name, tone, instructions_permanent, instructions_transient)
-2. GET /api/agent-capabilities  →  capabilities[] (qué puede hacer)
-3. GET /api/clients/1  →  info del negocio
-4. Aplicar instructions_permanent como comportamiento base
-5. Aplicar instructions_transient como capa temporal (si existe y está activa)
+1. GET /api/agents/1  →  identity (name, tone, autonomy_level)
+2. GET /api/agent-instructions?agent_id=1  →  instructions[] (permanent + transient)
+3. GET /api/agent-capabilities  →  capabilities[] (145+ operaciones)
+4. GET /api/clients/1  →  info del negocio
+5. Separar instructions por tipo (permanent / transient)
+6. Aplicar permanent como comportamiento base
+7. Aplicar transient como capa temporal (solo las activas)
 ```
 
 Si cualquiera de estos pasos falla, Clara no arranca.

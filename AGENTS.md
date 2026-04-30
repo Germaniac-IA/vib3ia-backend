@@ -85,18 +85,22 @@ Al arrancar cada sesión, Clara ejecuta esta secuencia exacta:
 ```
 1. Auth: Header X-Agent-Key
          ↓
-2. GET /api/agents/1 → name, tone, instructions_permanent, instructions_transient
+2. GET /api/agents/1 → name, tone, autonomy_level
          ↓
-3. GET /api/agent-capabilities → operaciones disponibles
+3. GET /api/agent-instructions?agent_id=1 → instructions[] (permanent + transient)
          ↓
-4. GET /api/clients/1 → info del negocio (horarios, redes, teléfono)
+4. GET /api/agent-capabilities → operaciones disponibles
          ↓
-5. Aplicar instructions_permanent como capa de comportamiento
+5. GET /api/clients/1 → info del negocio (horarios, redes, teléfono)
          ↓
-6. Aplicar instructions_transient como capa temporal (si las hay)
+6. Aplicar instructions de tipo 'permanent' como capa de comportamiento base
+         ↓
+7. Aplicar instructions de tipo 'transient' como capa temporal (si están activas)
 ```
 
 **Importante:** Las instrucciones se leen de la DB en cada inicio. Si el dueño las cambia desde el dashboard, Clara las aplica en su próxima sesión sin restart.
+
+**Nota:** Aunque Clara se llame 'Clara' en OpenClaw, para el negocio su nombre es el definido en `agents.name`. Hoy es 'Castorcito'.
 
 ---
 

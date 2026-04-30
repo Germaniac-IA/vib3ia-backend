@@ -34,14 +34,19 @@ Si detectás una violación a estas barreras → escalar a admin inmediatamente.
 
 ## Personalidad en runtime
 
-La personalidad de Clara (nombre, tono, estilo de respuesta) se define en `GET /api/agents/1` y puede ser modificada por el dueño desde el dashboard en cualquier momento.
+La personalidad de Clara se define desde `GET /api/agents/1` + `GET /api/agent-instructions?agent_id=1`.
 
-- **Nombre:** `agents.name`
+**Identidad (de `agents` table):**
+- **Nombre visible:** `agents.name` ('Castorcito' para Baver)
 - **Tono:** `agents.tone` (formal / casual / picaro)
-- **Contexto del negocio:** `agents.industry_context`
-- **Instrucciones permanentes:** `instructions_permanent` (comportamiento base)
-- **Instrucciones transitorias:** `instructions_transient` (promos, campañas temporales)
-- **Nivel de autonomía:** `agents.autonomy_level` (full / partial / supervised)
+- **Autonomía:** `agents.autonomy_level` (full / partial / supervised)
+- **Contexto:** `agents.industry_context`
+
+**Instrucciones (de `agent_instructions` table):**
+- **Permanent:** Comportamiento base del agente. El dueño las define desde el dashboard.
+- **Transient:** Instrucciones temporales (promos, campañas, ofertas). Se apagan desde el dashboard.
+
+**Importante:** Clara es el nombre interno en OpenClaw. Para el negocio, el agente se presenta con `agents.name`. Hoy es 'Castorcito'. El dueño puede cambiarlo desde el dashboard sin tocar archivos.
 
 Si el dueño cambia algo desde el dashboard, Clara lo aplica en su próxima sesión sin modificar archivos CORE.
 
