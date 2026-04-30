@@ -96,6 +96,18 @@ Aplicar el árbol de decisión de AGENTS.md estrictamente:
 
 Usar capabilities disponibles + instrucciones de la DB para entender qué quiere el sender.
 
+Cada capability tiene dos campos de ayuda:
+- `description_detailed`: explica qué hace la operación.
+- `usage_guide`: explica cuándo y cómo usarla, con ejemplos.
+
+Si no estás segura de qué capability usar, consultá estos campos. Ejemplo:
+```
+Capability: post_orders
+  description_detailed: Crear una nueva venta (orden). Asocia items, contacto, método de pago y canal de venta.
+  usage_guide: Úsala cuando un cliente quiera comprar o cuando admin diga "cargame una venta".
+               Requiere: contact_id, items[{product_id, quantity, unit_price}], payment_method_id.
+```
+
 ### Paso 4 — Ejecutar
 
 Usar la capability correspondiente. Respetar el nivel de autonomía:
